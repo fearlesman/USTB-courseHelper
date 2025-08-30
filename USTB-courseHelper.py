@@ -58,6 +58,15 @@ class CourseSelectionApp:
         self.root.geometry("1080x720")
         self.root.configure(bg="#f0f0f0")
         
+        self.course_cache = {}
+        self.cache_file = os.path.join(os.path.dirname(__file__), "course_cache.json")
+        self.course_list_file = os.path.join(os.path.dirname(__file__), "course_list.json")
+
+         # 加载课程缓存
+        self.load_course_cache()
+        # 加载保存的课程列表
+        self.load_saved_course_list()
+
         # 配置样式
         self.style = ttk.Style()
         self.style.configure("TFrame", background="#f0f0f0")
@@ -87,7 +96,125 @@ class CourseSelectionApp:
         self.configure_browser()
         chrome_driver_path = os.path.join(os.path.dirname(__file__), "chromedriver.exe")
         self.service = Service(chrome_driver_path)
+
+         # 设置窗口关闭事件处理
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         
+        # 启动自动保存线程
+        self.auto_save_thread = threading.Thread(target=self.auto_save_course_list, daemon=True)
+        self.auto_save_thread.start()
+    
+    def load_course_cache(self):
+        """加载课程缓存"""
+        try:
+            if os.path.exists(self.cache_file):
+                with open(self.cache_file, 'r', encoding='utf-8') as f:
+                    self.course_cache = orjson.loads(f.read())
+                print(f"✅ 已加载 {len(self.course_cache)} 条课程缓存")
+        except Exception as e:
+            print(f"⚠️ 加载课程缓存失败: {e}")
+            self.course_cache = {}
+
+    def save_course_cache(self):
+        """保存课程缓存"""
+        try:
+            with open(self.cache_file, 'wb') as f:
+                f.write(orjson.dumps(self.course_cache, option=orjson.OPT_INDENT_2))
+            print(f"💾 已保存 {len(self.course_cache)} 条课程缓存")
+        except Exception as e:
+            print(f"⚠️ 保存课程缓存失败: {e}")
+
+    def get_cached_course(self, course_id, semester):
+        """获取缓存的课程信息"""
+        cache_key = f"{semester}_{course_id}"
+        return self.course_cache.get(cache_key)
+
+    def cache_course_info(self, course_id, semester, course_info):
+        """缓存课程信息"""
+        cache_key = f"{semester}_{course_id}"
+        self.course_cache[cache_key] = course_info
+        self.save_course_cache()  # 立即保存到文件
+    def load_saved_course_list(self):
+        """加载保存的课程列表"""
+        global course_data_list, course_id_count
+        
+        try:
+            if os.path.exists(self.course_list_file):
+                with open(self.course_list_file, 'r', encoding='utf-8') as f:
+                    saved_list = orjson.loads(f.read())
+                
+                # 验证数据格式
+                if isinstance(saved_list, list) and len(saved_list) > 0:
+                    # 重置ID计数
+                    course_id_count = len(saved_list)
+                    
+                    # 重新设置ID并验证数据结构
+                    valid_courses = []
+                    for i, course in enumerate(saved_list):
+                        # 确保必要字段存在
+                        if all(key in course for key in ["priority", "data", "name", "teacher", "course_id", "schedule"]):
+                            course["id"] = i + 1
+                            valid_courses.append(course)
+                    
+                    if valid_courses:
+                        course_data_list = valid_courses
+                        self.update_course_list()
+                        print(f"✅ 已加载 {len(course_data_list)} 门保存的课程")
+                    else:
+                        print("⚠️ 保存的课程列表数据无效，已清空")
+                else:
+                    print("⚠️ 保存的课程列表为空或格式错误")
+        except Exception as e:
+            print(f"⚠️ 加载课程列表失败: {e}")
+
+    def save_course_list(self):
+        """保存课程列表"""
+        global course_data_list
+        
+        try:
+            # 创建副本，不保存id字段（因为id会在下次启动时重新生成）
+            save_list = []
+            for course in course_data_list:
+                save_course = course.copy()
+                # 移除id，因为下次启动会重新生成
+                if "id" in save_course:
+                    del save_course["id"]
+                save_list.append(save_course)
+            
+            with open(self.course_list_file, 'wb') as f:
+                f.write(orjson.dumps(save_list, option=orjson.OPT_INDENT_2))
+            print(f"💾 已保存 {len(course_data_list)} 门课程")
+        except Exception as e:
+            print(f"⚠️ 保存课程列表失败: {e}")
+
+    def auto_save_course_list(self):
+        """自动保存课程列表（用于异常关闭）"""
+        while True:
+            time.sleep(30)  # 每30秒自动保存一次
+            if selection_running or stop_selection:
+                continue  # 选课过程中不自动保存
+            self.save_course_list()
+
+    def on_closing(self):
+        """处理窗口关闭事件"""
+        global stop_display, stop_selection
+        
+        # 停止显示二维码
+        stop_display = True
+        
+        # 停止选课
+        if selection_running:
+            stop_selection = True
+            print("🛑 正在停止选课进程...")
+            # 等待选课进程停止
+            time.sleep(1)
+        
+        # 保存课程列表
+        self.save_course_list()
+        
+        print("👋 程序即将关闭，已保存数据")
+        self.root.destroy()
+
     def configure_browser(self):
         # 浏览器选项
         self.chrome_options = Options()
@@ -189,6 +316,16 @@ class CourseSelectionApp:
         # 课程类型
         type_frame = ttk.Frame(input_frame, style="TFrame")
         type_frame.pack(fill="x", pady=5)
+        # 是否在选到一门课后停止
+        stop_on_success_frame = ttk.Frame(input_frame, style="TFrame")
+        stop_on_success_frame.pack(fill="x", pady=5)
+        self.stop_on_success_var = tk.BooleanVar(value=True)  # 默认开启（选到一门就停止）
+        stop_on_success_check = ttk.Checkbutton(stop_on_success_frame, 
+                                            text="选到一门课后停止选课", 
+                                            variable=self.stop_on_success_var)
+        stop_on_success_check.pack(side=tk.LEFT)
+        ttk.Label(stop_on_success_frame, 
+                text="（关闭后，即使选到一门课也会继续尝试其他课程）").pack(side=tk.LEFT, padx=(5, 0))
         
         ttk.Label(type_frame, text="课程类型：").pack(side=tk.LEFT, padx=(0, 10))
         self.course_type_var = tk.StringVar()
@@ -285,6 +422,8 @@ class CourseSelectionApp:
         # 删除按钮
         self.remove_course = ttk.Button(list_frame, text="删除选中课程", command=self.remove_course)
         self.remove_course.pack(pady=5)
+
+        self.update_course_list()
     
     def clear_log(self):
         self.log_text.config(state=tk.NORMAL)
@@ -486,6 +625,44 @@ class CourseSelectionApp:
     def query_course_info(self, course_id, p_xn, p_xq, p_xnxq, p_dqxn, p_dqxq, p_dqxnxq, p_xkfsdm, priority):
         global final_cookies_dict, course_data_list
         
+        # 构建缓存键 - 使用学期格式：p_xn+p_xq (如: "2023-20241")
+        semester = f"{p_xn}{p_xq}"
+        cache_key = f"{semester}_{course_id}"
+        
+        # 检查缓存
+        cached_course = self.get_cached_course(course_id, semester)
+        if cached_course:
+            print(f"ℹ️ 从缓存中获取课程 {course_id} 的信息")
+            # 使用缓存数据
+            course_name = cached_course["name"]
+            teacher = cached_course["teacher"]
+            p_id = cached_course["p_id"]
+            p_kclb = cached_course["p_kclb"]
+            course_schedule = cached_course["schedule"]
+            
+            # 保存课程数据
+            course_data = {
+                "priority": priority,
+                "data": {
+                    "p_xktjz": "rwtjzyx",
+                    "p_xn": p_xn,
+                    "p_xq": p_xq,
+                    "p_xkfsdm": p_xkfsdm,
+                    "p_kclb": p_kclb,
+                    "p_id": p_id
+                },
+                "name": course_name,
+                "teacher": teacher,
+                "course_id": course_id,
+                "schedule": course_schedule,
+                "id": len(course_data_list) + 1
+            }
+            course_data_list.append(course_data)
+            self.root.after(0, lambda: self.update_course_list())
+            self.root.after(0, lambda: messagebox.showinfo("成功", f"已添加课程：{course_name}（来自缓存）"))
+            self.root.after(0, lambda: self.status_var.set("课程添加成功"))
+            return
+        
         try:
             session = requests.Session()
             session.cookies.update(final_cookies_dict)
@@ -582,9 +759,23 @@ class CourseSelectionApp:
                     "id": course_id_count
                 }
                 course_data_list.append(course_data)
+
+                self.cache_course_info(
+                    course_id,
+                    semester,
+                    {
+                        "name": course_name,
+                        "teacher": teacher,
+                        "p_id": p_id,
+                        "p_kclb": p_kclb,
+                        "schedule": course_schedule
+                    }
+                )
+
                 self.root.after(0, lambda: self.update_course_list())
                 self.root.after(0, lambda: messagebox.showinfo("成功", f"已添加课程：{course_name}"))
                 self.root.after(0, lambda: self.status_var.set("课程添加成功"))
+
             
         except Exception as e:
             error_msg = f"查询课程 {course_id} 时出错：{e}"
@@ -593,9 +784,12 @@ class CourseSelectionApp:
             
     def update_course_list(self):
         # 清空列表
-        for item in self.course_tree.get_children():
-            self.course_tree.delete(item)
-            
+        try:
+            for item in self.course_tree.get_children():
+                self.course_tree.delete(item)
+        except Exception as e:
+            print(f"清空课程列表时出错：{e}")
+        
         # 按优先级排序
         sorted_courses = sorted(course_data_list, key=lambda x: x["priority"])
         
@@ -768,9 +962,18 @@ class CourseSelectionApp:
                                 if "success" in text or "成功" in text:
                                     success_msg = f"🎉 选课成功！课程：{course['name']} | 教师：{course['teacher']}"
                                     print(success_msg)
-                                    self.root.after(0, lambda msg=success_msg: messagebox.showinfo("成功", msg))
-                                    self.root.after(0, lambda: self.status_var.set("选课成功！"))
-                                    success = True
+                                    # 关键修改：根据用户选择决定是否继续
+                                    if self.stop_on_success_var.get():
+                                        success = True  # 原有逻辑：设置成功标志
+                                        self.root.after(0, lambda msg=success_msg: messagebox.showinfo("成功", msg))
+                                        self.root.after(0, lambda: self.status_var.set("选课成功！"))
+                                        break  # 跳出当前优先级的课程循环
+                                    else:
+                                        print("⏩ 选课成功，但将继续尝试其他课程...")
+                                        # 不设置success标志，继续尝试其他课程
+                                        # 可以将这门课标记为已成功，避免重复尝试
+                                        failed_course_ids.add(course_id)
+                                        continue
                                     break
                                 elif "冲突" in text:
                                     print(f"⛔ 时间冲突，放弃课程：{course['name']}（不再尝试）")
