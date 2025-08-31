@@ -32,6 +32,7 @@ course_data_list = []  # 存储课程数据（含优先级）
 course_id_count=0
 selection_running = False  # 是否正在抢课
 stop_selection = False     # 是否请求停止
+online_thread_running = False  # 是否正在运行online线程
 # 自定义 stdout，将 print 输出重定向到 GUI
 class CustomStdout:
     def __init__(self, queue):
@@ -198,10 +199,8 @@ class CourseSelectionApp:
     def on_closing(self):
         """处理窗口关闭事件"""
         global stop_display, stop_selection
-        
         # 停止显示二维码
         stop_display = True
-        
         # 停止选课
         if selection_running:
             stop_selection = True
@@ -209,9 +208,11 @@ class CourseSelectionApp:
             # 等待选课进程停止
             time.sleep(1)
         
+        # 停止会话保持线程
+        self.stop_online_keepalive()
+        
         # 保存课程列表
         self.save_course_list()
-        
         print("👋 程序即将关闭，已保存数据")
         self.root.destroy()
 
@@ -518,9 +519,7 @@ class CourseSelectionApp:
     def monitor_login_status(self):
         global current_img_data, qr_image_url, stop_display, login_success, final_cookies_dict, driver
         wait = WebDriverWait(driver, 5)
-        
         print("🔄 正在监控二维码与登录状态...")
-        
         while not login_success and not stop_display:
             try:
                 # 检查是否在 iframe（二维码阶段）
@@ -529,7 +528,6 @@ class CourseSelectionApp:
                     driver.switch_to.frame(iframe)
                     qr_img = driver.find_element(By.ID, "qrimg")
                     new_src = qr_img.get_attribute("src")
-                    
                     if new_src and new_src != qr_image_url:
                         qr_image_url = new_src
                         print("🖼️ 二维码已更新")
@@ -539,30 +537,23 @@ class CourseSelectionApp:
                     driver.switch_to.default_content()
                 except Exception as e:
                     driver.switch_to.default_content()
-                    
                 # 检查是否跳转到目标页面
-                current_url = driver.current_url
-                if "https://byyt.ustb.edu.cn/authentication/main" in current_url:
+                if "https://byyt.ustb.edu.cn/authentication/main" in driver.current_url:
                     print(f"\n🎉 检测到登录成功！")
                     self.status_var.set("登录成功！正在获取 Cookie...")
-                    time.sleep(0.2)
-                    
+                    time.sleep(0.1)
                     # 提取关键 Cookie
                     cookies = driver.get_cookies()
                     final_cookies_dict = {c['name']: c['value'] for c in cookies}
                     print(f"\n🔐 已获取 {len(final_cookies_dict)} 个 Cookie")
-                    # for name in ['INCO', 'SESSION']:
-                    #     if name in final_cookies_dict:
-                    #         print(f"✅ 关键 Cookie：{name} = {final_cookies_dict[name]}")
+                    print(final_cookies_dict)
                     login_success = True
+                    self.start_online_keepalive()
                     break
-                    
-                time.sleep(0.5)
-                
+                time.sleep(0.2)
             except Exception as e:
                 print("🟡 监控过程中出现异常：", str(e))
                 time.sleep(2)
-                
         stop_display = True
         
     def add_course(self):
@@ -578,7 +569,7 @@ class CourseSelectionApp:
         if course_type_text == "素质扩展课":
             p_xkfsdm = "sztzk-b-b"
         elif course_type_text == "专业扩展课":
-            p_xkfsdm = "zyxtk-b-b"
+            p_xkfsdm = "zytzk-b-b"
         elif course_type_text == "MOOC":
             p_xkfsdm = "mooc-b-b"
         elif course_type_text == "必修课":
@@ -667,32 +658,33 @@ class CourseSelectionApp:
             session = requests.Session()
             session.cookies.update(final_cookies_dict)
             session.headers.update({
-                "Accept": "*/*",
-                "Accept-Encoding": "gzip, deflate, br, zstd",
-                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                "Host": "byyt.ustb.edu.cn",
-                "Origin": "https://byyt.ustb.edu.cn",
-                "Pragma": "no-cache",
-                "Referer": "https://byyt.ustb.edu.cn/Xsxk/query/1",
-                "RoleCode": "null",
-                "Sec-Fetch-Dest": "empty",
-                "Sec-Fetch-Mode": "cors",
-                "Sec-Fetch-Site": "same-origin",
-                "User-Agent": "Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Mobile Safari/537.36 Edg/139.0.0.0",
-                "X-Requested-With": "XMLHttpRequest",
+                "accept": "*/*",
+                "accept-encoding": "gzip, deflate, br, zstd",
+                "accept-language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
+                "cache-control": "no-cache",
+                "connection": "keep-alive",
+                "content-length": "537",
+                "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "host": "byyt.ustb.edu.cn",
+                "origin": "https://byyt.ustb.edu.cn",
+                "pragma": "no-cache",
+                "referer": "https://byyt.ustb.edu.cn/Xsxk/query/1",
+                "rolecode": "null",
                 "sec-ch-ua": '"Not;A=Brand";v="99", "Microsoft Edge";v="139", "Chromium";v="139"',
                 "sec-ch-ua-mobile": "?1",
                 "sec-ch-ua-platform": '"Android"',
+                "sec-fetch-dest": "empty",
+                "sec-fetch-mode": "cors",
+                "sec-fetch-site": "same-origin",
+                "user-agent": "Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Mobile Safari/537.36 Edg/139.0.0.0",
+                "x-requested-with": "XMLHttpRequest"
             })
             
             qurl = "https://byyt.ustb.edu.cn/Xsxk/queryKxrw"
             qdata = {
-                'cxsfmt': 1,
-                'p_pylx': 1,
-                'mxpylx': 1,
+                'cxsfmt': "1",
+                'p_pylx': "1",
+                'mxpylx': "1",
                 'p_xn': p_xn,
                 'p_xq': p_xq,
                 'p_xnxq': p_xnxq,
@@ -702,11 +694,16 @@ class CourseSelectionApp:
                 'p_xkfsdm': p_xkfsdm,
                 'p_kcdm_cxrw': course_id,
                 'p_kcdm_cxrw_zckc': course_id,
-                'p_sfxsgwckb': 1,
-                'pageNum': 1,
-                'pageSize': 15
+                "p_sfxsgwckb": "1",
+                "p_sfgldjr":"0",
+                "p_sfredis":"0",
+                "p_sfsyxkgwc":"0",
+                "p_sfhlctkc":"0",
+                "p_sfhllrlkc":"0",
+                'pageNum': "1",
+                'pageSize': "100"
             }
-            
+            print(f"🔍 正在查询课程 {course_id} 的信息...")
             response = session.post(qurl, data=qdata)
             if response.status_code != 200:
                 error_msg = f"查询失败，状态码：{response.status_code}"
@@ -979,6 +976,10 @@ class CourseSelectionApp:
                                     print(f"⛔ 时间冲突，放弃课程：{course['name']}（不再尝试）")
                                     failed_course_ids.add(course_id)  # 标记为失败，不再尝试
                                     continue  # 继续尝试同优先级其他课程
+                                elif "不符合" in text:
+                                    print(f"⛔ 不符合要求，放弃课程：{course['name']}（不再尝试）")
+                                    failed_course_ids.add(course_id)  # 标记为失败，不再尝试
+                                    continue  # 继续尝试同优先级其他课程
                                 elif "full" in text or "已满" in text:
                                     retry_enabled = self.retry_full_var.get()
                                     if not retry_enabled:
@@ -1032,6 +1033,86 @@ class CourseSelectionApp:
         stop_selection = True
         self.status_var.set("正在停止抢课...")
         print("🛑 用户请求停止抢课")
+    def start_online_keepalive(self):
+        """启动保持在线的后台线程"""
+        global online_thread_running
+        online_thread_running = True
+        self.online_thread = threading.Thread(target=self.online_keepalive_thread, daemon=True)
+        self.online_thread.start()
+        print("🔄 已启动会话保持线程，每10分钟发送一次online请求")
+        
+    def stop_online_keepalive(self):
+        """停止保持在线的后台线程"""
+        global online_thread_running
+        online_thread_running = False
+        if hasattr(self, 'online_thread') and self.online_thread and self.online_thread.is_alive():
+            print("🛑 等待会话保持线程结束...")
+            self.online_thread.join(timeout=2.0)
+            if self.online_thread.is_alive():
+                print("⚠️ 会话保持线程未能正常结束")
+            else:
+                print("✅ 会话保持线程已结束")
+                
+    def online_keepalive_thread(self):
+        """保持在线的后台线程"""
+        global online_thread_running, login_success
+        
+        print("⏳ 会话保持线程已启动，等待10分钟后发送首次请求...")
+        while online_thread_running:
+            # 等待10分钟
+            for _ in range(300):  # 600秒 = 10分钟
+                if not online_thread_running:
+                    break
+                time.sleep(1)
+            
+            if not online_thread_running:
+                break
+                
+            # 检查是否已登录
+            if login_success:
+                self.send_online_request()
+            else:
+                print("ℹ️ 未登录，跳过online请求")
+                
+    def send_online_request(self):
+        """发送保持在线的请求"""
+        global final_cookies_dict, login_success
+        try:
+            url = "https://byyt.ustb.edu.cn/component/online"
+            headers = {
+                "Accept": "*/*",
+                "Accept-Encoding": "gzip, deflate, br, zstd",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "Content-Length": "0",
+                "Host": "byyt.ustb.edu.cn",
+                "Origin": "https://byyt.ustb.edu.cn",
+                "Pragma": "no-cache",
+                "Referer": "https://byyt.ustb.edu.cn/authentication/main",
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "same-origin",
+                "User-Agent": "Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Mobile Safari/537.36 Edg/139.0.0.0",
+                "sec-ch-ua": '"Not;A=Brand";v="99", "Microsoft Edge";v="139", "Chromium";v="139"',
+                "sec-ch-ua-mobile": "?1",
+                "sec-ch-ua-platform": '"Android"',
+            }
+            
+            session = requests.Session()
+            session.cookies.update(final_cookies_dict)
+            session.headers.update(headers)
+            
+            response = session.post(url)
+            if response.status_code == 200:
+                print("✅ 成功发送online请求，会话保持活跃")
+            else:
+                print(f"⚠️ online请求失败，状态码：{response.status_code}")
+        except Exception as e:
+            print(f"❌ 发送online请求时出错：{str(e)}")
+            # 如果出现异常，可能是会话已过期
+            if "401" in str(e) or "403" in str(e):
+                print("⚠️ 可能会话已过期，建议重新登录")
 # 启动应用
 if __name__ == "__main__":
     root = tk.Tk()
