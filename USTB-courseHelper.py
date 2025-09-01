@@ -104,7 +104,94 @@ class CourseSelectionApp:
         # 启动自动保存线程
         self.auto_save_thread = threading.Thread(target=self.auto_save_course_list, daemon=True)
         self.auto_save_thread.start()
+
+        self.window_minimized = False
+        self.window_resizing = False
+        self.last_window_state = None
+        self.window_state_debounce_id = None
+        
+        # 绑定窗口状态变化事件
+        self.root.bind("<Configure>", self.on_window_configure)
+        self.root.bind("<Unmap>", self.on_window_minimize)  # 捕获最小化事件
+        self.root.bind("<Map>", self.on_window_restore)     # 捕获还原事件
     
+    def on_window_configure(self, event):
+        """处理窗口配置变化事件"""
+        # 取消之前的去抖动调用
+        if self.window_state_debounce_id:
+            self.root.after_cancel(self.window_state_debounce_id)
+        
+        # 设置新的去抖动调用
+        self.window_state_debounce_id = self.root.after(100, self.check_window_state)
+
+    def on_window_minimize(self, event):
+        """窗口最小化时调用"""
+        self.set_window_minimized(True)
+
+    def on_window_restore(self, event):
+        """窗口还原时调用"""
+        self.set_window_minimized(False)
+
+    def set_window_minimized(self, is_minimized):
+        """设置窗口最小化状态，避免重复处理"""
+        if self.window_minimized == is_minimized:
+            return  # 状态未变化，无需处理
+        
+        self.window_minimized = is_minimized
+        if is_minimized:
+            print("窗口已最小化，暂停不必要的UI更新")
+            # 在这里添加暂停UI更新的逻辑
+        else:
+            print("窗口已恢复，恢复UI更新")
+            # 在这里添加恢复UI更新的逻辑
+
+    def check_window_state(self):
+        """检查并更新窗口状态"""
+        try:
+            # 获取当前窗口状态
+            current_state = self.root.state()
+            is_minimized = (current_state == 'iconic')
+            
+            # 仅当状态变化时才处理
+            if self.window_minimized != is_minimized:
+                self.set_window_minimized(is_minimized)
+        except Exception as e:
+            print(f"检查窗口状态时出错: {e}")
+
+    def _schedule_treeview_refresh(self):
+        """计划Treeview刷新，避免频繁重绘"""
+        if hasattr(self, '_treeview_refresh_id'):
+            self.root.after_cancel(self._treeview_refresh_id)
+        
+        # 延迟执行，等待窗口大小稳定
+        self._treeview_refresh_id = self.root.after(50, self._refresh_treeview)
+
+    def _refresh_treeview(self):
+        """刷新Treeview显示"""
+        try:
+            # 不需要隐藏/显示组件，只需更新内部布局
+            if hasattr(self, 'course_tree'):
+                self.course_tree.update_idletasks()
+                
+                # 如果需要，可以在这里调整列宽等
+                width = self.course_tree.winfo_width()
+                if width > 100:  # 确保宽度有效
+                    # 根据窗口宽度动态调整列宽
+                    col_width = max(50, width // 6 - 10)
+                    for col in self.course_tree["columns"]:
+                        self.course_tree.column(col, width=col_width)
+        except Exception as e:
+            print(f"刷新Treeview时出错: {e}")
+    def on_window_minimize(self, event):
+        """窗口最小化时调用"""
+        self.window_minimized = True
+        print("窗口已最小化，暂停不必要的UI更新")
+
+    def on_window_restore(self, event):
+        """窗口还原时调用"""
+        self.window_minimized = False
+        print("窗口已恢复，恢复UI更新")
+
     def load_course_cache(self):
         """加载课程缓存"""
         try:
@@ -254,29 +341,53 @@ class CourseSelectionApp:
         self.login_btn.pack(side=tk.LEFT, padx=5)
 
     def update_console(self):
+        """优化后的控制台输出更新，减少CPU占用并处理窗口状态"""
+        last_update = time.time()
+        MIN_UPDATE_INTERVAL = 0.1  # 最小更新间隔(秒)
+        
         while True:
             try:
+                # 检查窗口是否最小化，如果是则减少更新频率
+                is_minimized = getattr(self, 'window_minimized', False)
+                update_interval = 1.0 if is_minimized else MIN_UPDATE_INTERVAL
+                
+                # 检查是否达到最小更新间隔
+                current_time = time.time()
+                if current_time - last_update < update_interval:
+                    time.sleep(max(0.01, update_interval - (current_time - last_update)))
+                    continue
+                    
+                # 处理消息队列
                 messages = []
-                for _ in range(10):  # 每次最多处理10条消息
-                    if not log_queue.empty():
-                        messages.append(log_queue.get_nowait())
-                    else:
+                for _ in range(20):  # 每次最多处理20条消息
+                    try:
+                        msg = log_queue.get_nowait()
+                        messages.append(msg)
+                    except queue.Empty:
                         break
                 
                 if messages and hasattr(self, 'console_output'):
                     self.console_output.config(state=tk.NORMAL)
                     for msg in messages:
-                        self.console_output.insert(tk.END, '\n' + msg)
-                        self.console_output.see(tk.END)  # 滚动到最新消息
+                        self.console_output.insert(tk.END, '\n' + msg.strip())
                     
-                    # 限制显示行数，防止内存占用过高
-                    lines = self.console_output.get(1.0, tk.END).count('\n')
-                    if lines > 20:  # 只保留最后20行
+                    # 滚动到最新消息
+                    self.console_output.see(tk.END)
+                    
+                    # 限制显示行数，保留最后50行
+                    lines = int(self.console_output.index('end-1c').split('.')[0])
+                    if lines > 50:
                         self.console_output.delete(1.0, f"{lines-100}.0")
                     
                     self.console_output.config(state=tk.DISABLED)
+                    last_update = time.time()
+                
+                # 添加基本休眠，避免CPU占用过高
+                time.sleep(0.1)
+                
             except Exception as e:
                 print(f"更新控制台输出时出错：{e}")
+                time.sleep(0.5)  # 出错时增加休眠时间
     def setup_course_tab(self):
         course_frame = ttk.Frame(self.course_tab, style="TFrame")
         course_frame.pack(padx=20, pady=20, fill="both", expand=True)
@@ -393,8 +504,11 @@ class CourseSelectionApp:
             list_frame, 
             columns=columns, 
             show="headings",
-            selectmode="extended"  # 支持 Ctrl/Shift 多选
+            selectmode="extended"
         )
+        
+        # 添加窗口大小变化时的优化处理
+        self.course_tree.bind("<Configure>", self.on_treeview_configure)
                 
         # 定义列名
         self.course_tree.heading("id", text="序号")
@@ -425,7 +539,22 @@ class CourseSelectionApp:
         self.remove_course.pack(pady=5)
 
         self.update_course_list()
-    
+    def on_treeview_configure(self, event):
+        """优化表格重绘，减少窗口调整大小时的卡顿"""
+        # 暂时禁用表格重绘
+        self.course_tree.grid_remove()
+        
+        # 延迟恢复重绘，等待窗口大小稳定
+        if hasattr(self, '_treeview_after_id'):
+            self.root.after_cancel(self._treeview_after_id)
+        
+        self._treeview_after_id = self.root.after(50, self._restore_treeview)
+
+    def _restore_treeview(self):
+        """恢复表格重绘"""
+        self.course_tree.pack()
+        self.course_tree.update_idletasks()
+
     def clear_log(self):
         self.log_text.config(state=tk.NORMAL)
         self.log_text.delete(1.0, tk.END)
@@ -498,15 +627,28 @@ class CourseSelectionApp:
             
     def display_qr_thread(self):
         global current_img_data, stop_display
+        last_update = time.time()
+        MIN_UPDATE_INTERVAL = 0.2  # 最小更新间隔(秒)
         
         while not stop_display:
+            # 检查窗口是否最小化
+            if getattr(self, 'window_minimized', False):
+                time.sleep(1.0)  # 最小化时大幅增加休眠时间
+                continue
+                
             if current_img_data is not None:
                 try:
-                    tk_image = ImageTk.PhotoImage(current_img_data)
-                    self.root.after(100, lambda: self.update_qr_image(tk_image))
+                    # 检查是否达到最小更新间隔
+                    current_time = time.time()
+                    if current_time - last_update >= MIN_UPDATE_INTERVAL:
+                        tk_image = ImageTk.PhotoImage(current_img_data)
+                        self.root.after(100, lambda: self.update_qr_image(tk_image))
+                        last_update = current_time
                 except Exception as e:
                     print(f"显示二维码时出错：{e}")
-            time.sleep(0.2)
+            
+            # 添加基本休眠，避免CPU占用过高
+            time.sleep(0.05)
             
     def update_qr_image(self, image):
         try:
@@ -933,7 +1075,7 @@ class CourseSelectionApp:
                         current_time = datetime.now()
                         minute = current_time.minute
                         if minute == 59:
-                            time.sleep(58.5)
+                            time.sleep(max(58.5-current_time.second,0))
                             continue
 
                         any_active_in_priority = False  # 当前优先级是否有可抢的课
