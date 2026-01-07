@@ -221,10 +221,8 @@ class CourseSelectionApp:
     def load_saved_course_list(self, student_name=None):
         """加载指定学生的课程列表"""
         global course_data_list, course_id_count
-        
         if student_name is None:
             student_name = self.current_student_name
-            
         course_file = self.get_student_course_file(student_name)
         if not course_file:
             print("⚠️ 学生姓名为空，无法加载课程列表")
@@ -232,35 +230,36 @@ class CourseSelectionApp:
             course_id_count = 0
             self.update_course_list()
             return
-        
         try:
             if os.path.exists(course_file):
                 with open(course_file, 'r', encoding='utf-8') as f:
                     saved_list = orjson.loads(f.read())
-                
-                if isinstance(saved_list, list) and len(saved_list) > 0:
-                    course_id_count = len(saved_list)
-                    
-                    valid_courses = []
-                    for i, course in enumerate(saved_list):
-                        if all(key in course for key in ["priority", "data", "name", "teacher", "course_id", "schedule"]):
-                            course["id"] = i + 1
-                            valid_courses.append(course)
-                    
-                    if valid_courses:
-                        course_data_list = valid_courses
-                        self.update_course_list()
-                        print(f"✅ 已加载 {student_name} 的 {len(course_data_list)} 门课程")
+                    if isinstance(saved_list, list) and len(saved_list) > 0:
+                        valid_courses = []
+                        for i, course in enumerate(saved_list):
+                            if all(key in course for key in ["priority", "data", "name", "teacher", "course_id", "schedule"]):
+                                # 保持原有的ID，不重新设置
+                                if "id" not in course:
+                                    course["id"] = i + 1
+                                valid_courses.append(course)
+                        
+                        if valid_courses:
+                            course_data_list = valid_courses
+                            # 设置计数器为最大ID
+                            course_id_count = max(course["id"] for course in valid_courses)
+                            self.update_course_list()
+                            print(f"✅ 已加载 {student_name} 的 {len(course_data_list)} 门课程")
+                        else:
+                            print(f"⚠️ {student_name} 的课程列表数据无效，已清空")
+                            course_data_list = []
+                            course_id_count = 0
+                            self.update_course_list()
                     else:
-                        print(f"⚠️ {student_name} 的课程列表数据无效，已清空")
+                        # 空列表处理
+                        print(f"ℹ️ {student_name} 暂无保存的课程")
                         course_data_list = []
                         course_id_count = 0
                         self.update_course_list()
-                else:
-                    print(f"ℹ️ {student_name} 暂无保存的课程")
-                    course_data_list = []
-                    course_id_count = 0
-                    self.update_course_list()
             else:
                 print(f"ℹ️ {student_name} 是新用户，暂无课程记录")
                 course_data_list = []
@@ -855,6 +854,13 @@ class CourseSelectionApp:
             p_kclb = cached_course["p_kclb"]
             course_schedule = cached_course["schedule"]
             
+            # 获取全局变量
+            global course_id_count
+            
+            # 使用 course_id_count 生成新的ID
+            new_id = course_id_count + 1
+            course_id_count = new_id
+            
             course_data = {
                 "priority": priority,
                 "data": {
@@ -869,13 +875,11 @@ class CourseSelectionApp:
                 "teacher": teacher,
                 "course_id": course_id,
                 "schedule": course_schedule,
-                "id": len(course_data_list) + 1
+                "id": new_id  # 使用新的ID
             }
             course_data_list.append(course_data)
-            
             # 添加课程后立即保存
             self.save_course_list()
-            
             self.root.after(0, lambda: self.update_course_list())
             self.root.after(0, lambda: messagebox.showinfo("成功", f"已添加课程：{course_name}（来自缓存）"))
             self.root.after(0, lambda: self.status_var.set("课程添加成功"))
@@ -947,7 +951,7 @@ class CourseSelectionApp:
                 
             course_total = coursedata['kxrwList']['total']
             course_info = coursedata['kxrwList']['list']
-            global course_id_count
+            #global course_id_count
             
             for course in course_info:
                 course_id_count+=1
@@ -1009,15 +1013,26 @@ class CourseSelectionApp:
             self.root.after(0, lambda: messagebox.showerror("错误", error_msg))
             
     def update_course_list(self):
+        global course_data_list, course_id_count
         try:
             for item in self.course_tree.get_children():
                 self.course_tree.delete(item)
         except Exception as e:
             print(f"清空课程列表时出错：{e}")
-        
-        sorted_courses = sorted(course_data_list, key=lambda x: x["priority"])
-        
-        for course in sorted_courses:
+
+        # ✅ 1. 稳定排序：优先级为主，原 id 为辅
+        sorted_courses = sorted(course_data_list, key=lambda x: (x["priority"], x["id"]))
+
+        # ✅ 2. 重置 id 为连续序号（1, 2, 3, ...）
+        for new_id, course in enumerate(sorted_courses, start=1):
+            course["id"] = new_id
+
+        # ✅ 3. 更新全局计数器（用于后续添加课程的初始 id）
+        course_id_count = len(sorted_courses)
+        course_data_list = sorted_courses  # 确保全局列表与 UI 一致
+
+        # ✅ 4. 刷新表格
+        for course in course_data_list:
             self.course_tree.insert("", "end", values=(
                 course["id"],
                 course["priority"],
@@ -1028,41 +1043,46 @@ class CourseSelectionApp:
             ))
             
     def remove_course(self):
-        global course_data_list
-
+        global course_data_list, course_id_count
         selected_items = self.course_tree.selection()
         if not selected_items:
             messagebox.showwarning("警告", "请先选择要删除的课程")
             return
-
+        
         deleted_names = []
         ids_to_remove = []
-
         for item in selected_items:
             values = self.course_tree.item(item, "values")
             course_id = int(values[0])  # 第一列是 id
             course_name = values[2]     # 第三列是课程名称
             ids_to_remove.append(course_id)
             deleted_names.append(course_name)
-
+        
         # 弹出确认框
         if len(deleted_names) > 1:
-            confirm = messagebox.askyesno("确认删除", f"确定要删除以下 {len(deleted_names)} 门课程吗？\n\n" + "\n".join(deleted_names))
+            confirm = messagebox.askyesno("确认删除", f"确定要删除以下 {len(deleted_names)} 门课程吗？\n" + "\n".join(deleted_names))
         else:
             confirm = messagebox.askyesno("确认删除", f"确定要删除课程：{deleted_names[0]} 吗？")
-
+        
         if not confirm:
             return
-
+        
         # 从 course_data_list 中移除对应课程
         course_data_list = [c for c in course_data_list if c["id"] not in ids_to_remove]
-
+        
+        # 重置所有课程的ID为连续序号
+        for i, course in enumerate(course_data_list):
+            course["id"] = i + 1
+        
+        # 更新全局计数器
+        course_id_count = len(course_data_list)
+        
         # 【核心修改】删除操作后立即保存当前人员的课程列表
         self.save_course_list()
-
+        
         # 刷新表格
         self.update_course_list()
-
+        
         # 提示删除成功
         if len(deleted_names) > 1:
             messagebox.showinfo("成功", f"已删除 {len(deleted_names)} 门课程")
@@ -1207,15 +1227,17 @@ class CourseSelectionApp:
                                     print("⏩ 选课成功，但将继续尝试其他课程...")
                                     failed_course_ids.add(course_id)
                                     continue
-                                break
+
                             elif "冲突" in text:
                                 print(f"⛔ 时间冲突，放弃课程：{course['name']}（不再尝试）")
                                 failed_course_ids.add(course_id)
                                 continue
+
                             elif "不符合" in text:
                                 print(f"⛔ 不符合要求，放弃课程：{course['name']}（不再尝试）")
                                 failed_course_ids.add(course_id)
                                 continue
+
                             elif "full" in text or "已满" in text:
                                 retry_enabled = self.retry_full_var.get()
                                 if not retry_enabled:
@@ -1225,6 +1247,15 @@ class CourseSelectionApp:
                                     print(f"⏸️ 课程已满：{course['name']}，等待下次重试...")
                                     any_active_in_priority = True
                                 continue
+
+                            elif "不在设置的时间范围内" in text or "未到选课时间" in text or "尚未开放" in text or "not in the time range" in text.lower():
+                                # ⏳ 尚未到选课时间，继续重试（不放弃，保持活跃）
+                                print(f"⏳ 选课时间未到：{course['name']}，持续等待中...")
+                                any_active_in_priority = True
+                                # 可选：防止过于频繁请求（比如每门课至少隔2秒）
+                                time.sleep(0.5)
+                                continue
+
                             else:
                                 print(f"⚠️ 未知响应（可能可抢）：{text[:100]}...")
                                 any_active_in_priority = True
