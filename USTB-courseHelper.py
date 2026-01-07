@@ -32,7 +32,8 @@ course_data_list = []  # 存储课程数据（含优先级）
 course_id_count=0
 selection_running = False  # 是否正在抢课
 stop_selection = False     # 是否请求停止
-online_thread_running = False  # 是否正在运行online线程
+online_thread_running = False  # 是否正在运行online线程gio
+
 # 自定义 stdout，将 print 输出重定向到 GUI
 class CustomStdout:
     def __init__(self, queue):
@@ -61,12 +62,17 @@ class CourseSelectionApp:
         
         self.course_cache = {}
         self.cache_file = os.path.join(os.path.dirname(__file__), "course_cache.json")
-        self.course_list_file = os.path.join(os.path.dirname(__file__), "course_list.json")
+        # 移除单一课程列表文件，改为按人员保存
+        # self.course_list_file = os.path.join(os.path.dirname(__file__), "course_list.json")
+        self.switch_timer = None
+
+        # 新增：当前抢课人员名称
+        self.current_student_name = ""
+        # 新增：人员切换锁，防止频繁切换
+        self.student_switch_lock = False
 
          # 加载课程缓存
         self.load_course_cache()
-        # 加载保存的课程列表
-        self.load_saved_course_list()
 
         # 配置样式
         self.style = ttk.Style()
@@ -112,16 +118,14 @@ class CourseSelectionApp:
         
         # 绑定窗口状态变化事件
         self.root.bind("<Configure>", self.on_window_configure)
-        self.root.bind("<Unmap>", self.on_window_minimize)  # 捕获最小化事件
-        self.root.bind("<Map>", self.on_window_restore)     # 捕获还原事件
+        self.root.bind("<Unmap>", self.on_window_minimize)
+        self.root.bind("<Map>", self.on_window_restore)
     
     def on_window_configure(self, event):
         """处理窗口配置变化事件"""
-        # 取消之前的去抖动调用
         if self.window_state_debounce_id:
             self.root.after_cancel(self.window_state_debounce_id)
         
-        # 设置新的去抖动调用
         self.window_state_debounce_id = self.root.after(100, self.check_window_state)
 
     def on_window_minimize(self, event):
@@ -135,24 +139,20 @@ class CourseSelectionApp:
     def set_window_minimized(self, is_minimized):
         """设置窗口最小化状态，避免重复处理"""
         if self.window_minimized == is_minimized:
-            return  # 状态未变化，无需处理
+            return
         
         self.window_minimized = is_minimized
         if is_minimized:
             print("窗口已最小化，暂停不必要的UI更新")
-            # 在这里添加暂停UI更新的逻辑
         else:
             print("窗口已恢复，恢复UI更新")
-            # 在这里添加恢复UI更新的逻辑
 
     def check_window_state(self):
         """检查并更新窗口状态"""
         try:
-            # 获取当前窗口状态
             current_state = self.root.state()
             is_minimized = (current_state == 'iconic')
             
-            # 仅当状态变化时才处理
             if self.window_minimized != is_minimized:
                 self.set_window_minimized(is_minimized)
         except Exception as e:
@@ -163,34 +163,21 @@ class CourseSelectionApp:
         if hasattr(self, '_treeview_refresh_id'):
             self.root.after_cancel(self._treeview_refresh_id)
         
-        # 延迟执行，等待窗口大小稳定
         self._treeview_refresh_id = self.root.after(50, self._refresh_treeview)
 
     def _refresh_treeview(self):
         """刷新Treeview显示"""
         try:
-            # 不需要隐藏/显示组件，只需更新内部布局
             if hasattr(self, 'course_tree'):
                 self.course_tree.update_idletasks()
                 
-                # 如果需要，可以在这里调整列宽等
                 width = self.course_tree.winfo_width()
-                if width > 100:  # 确保宽度有效
-                    # 根据窗口宽度动态调整列宽
+                if width > 100:
                     col_width = max(50, width // 6 - 10)
                     for col in self.course_tree["columns"]:
                         self.course_tree.column(col, width=col_width)
         except Exception as e:
             print(f"刷新Treeview时出错: {e}")
-    def on_window_minimize(self, event):
-        """窗口最小化时调用"""
-        self.window_minimized = True
-        print("窗口已最小化，暂停不必要的UI更新")
-
-    def on_window_restore(self, event):
-        """窗口还原时调用"""
-        self.window_minimized = False
-        print("窗口已恢复，恢复UI更新")
 
     def load_course_cache(self):
         """加载课程缓存"""
@@ -221,25 +208,41 @@ class CourseSelectionApp:
         """缓存课程信息"""
         cache_key = f"{semester}_{course_id}"
         self.course_cache[cache_key] = course_info
-        self.save_course_cache()  # 立即保存到文件
-    def load_saved_course_list(self):
-        """加载保存的课程列表"""
+        self.save_course_cache()
+
+    def get_student_course_file(self, student_name):
+        """获取指定学生的课程列表文件路径"""
+        if not student_name or not student_name.strip():
+            return None
+        # 文件名格式：course_list_学生姓名.json
+        safe_name = student_name.strip().replace('/', '_').replace('\\', '_')
+        return os.path.join(os.path.dirname(__file__), f"course_list_{safe_name}.json")
+
+    def load_saved_course_list(self, student_name=None):
+        """加载指定学生的课程列表"""
         global course_data_list, course_id_count
         
+        if student_name is None:
+            student_name = self.current_student_name
+            
+        course_file = self.get_student_course_file(student_name)
+        if not course_file:
+            print("⚠️ 学生姓名为空，无法加载课程列表")
+            course_data_list = []
+            course_id_count = 0
+            self.update_course_list()
+            return
+        
         try:
-            if os.path.exists(self.course_list_file):
-                with open(self.course_list_file, 'r', encoding='utf-8') as f:
+            if os.path.exists(course_file):
+                with open(course_file, 'r', encoding='utf-8') as f:
                     saved_list = orjson.loads(f.read())
                 
-                # 验证数据格式
                 if isinstance(saved_list, list) and len(saved_list) > 0:
-                    # 重置ID计数
                     course_id_count = len(saved_list)
                     
-                    # 重新设置ID并验证数据结构
                     valid_courses = []
                     for i, course in enumerate(saved_list):
-                        # 确保必要字段存在
                         if all(key in course for key in ["priority", "data", "name", "teacher", "course_id", "schedule"]):
                             course["id"] = i + 1
                             valid_courses.append(course)
@@ -247,66 +250,186 @@ class CourseSelectionApp:
                     if valid_courses:
                         course_data_list = valid_courses
                         self.update_course_list()
-                        print(f"✅ 已加载 {len(course_data_list)} 门保存的课程")
+                        print(f"✅ 已加载 {student_name} 的 {len(course_data_list)} 门课程")
                     else:
-                        print("⚠️ 保存的课程列表数据无效，已清空")
+                        print(f"⚠️ {student_name} 的课程列表数据无效，已清空")
+                        course_data_list = []
+                        course_id_count = 0
+                        self.update_course_list()
                 else:
-                    print("⚠️ 保存的课程列表为空或格式错误")
+                    print(f"ℹ️ {student_name} 暂无保存的课程")
+                    course_data_list = []
+                    course_id_count = 0
+                    self.update_course_list()
+            else:
+                print(f"ℹ️ {student_name} 是新用户，暂无课程记录")
+                course_data_list = []
+                course_id_count = 0
+                self.update_course_list()
         except Exception as e:
-            print(f"⚠️ 加载课程列表失败: {e}")
+            print(f"⚠️ 加载 {student_name} 的课程列表失败: {e}")
+            course_data_list = []
+            course_id_count = 0
+            self.update_course_list()
 
-    def save_course_list(self):
-        """保存课程列表"""
+    def save_course_list(self, student_name=None):
+        """保存指定学生的课程列表"""
         global course_data_list
         
+        if student_name is None:
+            student_name = self.current_student_name
+            
+        course_file = self.get_student_course_file(student_name)
+        if not course_file:
+            print("⚠️ 学生姓名为空，无法保存课程列表")
+            return
+        
         try:
-            # 创建副本，不保存id字段（因为id会在下次启动时重新生成）
             save_list = []
             for course in course_data_list:
                 save_course = course.copy()
-                # 移除id，因为下次启动会重新生成
                 if "id" in save_course:
                     del save_course["id"]
                 save_list.append(save_course)
             
-            with open(self.course_list_file, 'wb') as f:
+            with open(course_file, 'wb') as f:
                 f.write(orjson.dumps(save_list, option=orjson.OPT_INDENT_2))
-            print(f"💾 已保存 {len(course_data_list)} 门课程")
+            print(f"💾 已保存 {student_name} 的 {len(course_data_list)} 门课程")
         except Exception as e:
-            print(f"⚠️ 保存课程列表失败: {e}")
+            print(f"⚠️ 保存 {student_name} 的课程列表失败: {e}")
 
+    # def on_student_name_change(self, *args):
+    #     """学生姓名变化时的回调函数"""
+    #     if self.student_switch_lock:
+    #         return
+            
+    #     new_name = self.student_name_var.get().strip()
+        
+    #     # 如果名字没有实质性变化，不处理
+    #     if new_name == self.current_student_name:
+    #         return
+        
+    #     # 如果正在抢课，不允许切换
+    #     if selection_running:
+    #         messagebox.showwarning("警告", "正在抢课中，无法切换人员！")
+    #         self.student_switch_lock = True
+    #         self.student_name_var.set(self.current_student_name)
+    #         self.student_switch_lock = False
+    #         return
+        
+    #     # 保存当前人员的课程列表（如果有）
+    #     if self.current_student_name:
+    #         print(f"💾 切换人员：保存 {self.current_student_name} 的课程列表")
+    #         self.save_course_list(self.current_student_name)
+        
+    #     # 更新当前人员
+    #     old_name = self.current_student_name
+    #     self.current_student_name = new_name
+        
+    #     # 加载新人员的课程列表
+    #     if new_name:
+    #         print(f"📂 切换人员：加载 {new_name} 的课程列表")
+    #         self.load_saved_course_list(new_name)
+    #         self.status_var.set(f"已切换到 {new_name}")
+    #     else:
+    #         # 如果清空了姓名，也清空课程列表
+    #         global course_data_list, course_id_count
+    #         course_data_list = []
+    #         course_id_count = 0
+    #         self.update_course_list()
+    #         self.status_var.set("请输入抢课人员姓名")
+    def on_student_name_change(self, *args):
+        """
+        监听输入框变化（防抖处理版本）
+        当用户输入停止超过 0.8 秒后，才真正执行切换逻辑
+        """
+        if self.student_switch_lock:
+            return
+
+        # 如果之前有正在等待执行的任务，先取消它
+        if self.switch_timer:
+            self.root.after_cancel(self.switch_timer)
+
+        # 开启一个新的定时器，800毫秒后执行 process_student_switch
+        self.switch_timer = self.root.after(800, self.process_student_switch)
+
+    def process_student_switch(self):
+        """
+        实际执行人员切换逻辑的函数（由定时器触发）
+        """
+        # 清空定时器引用
+        self.switch_timer = None
+        
+        new_name = self.student_name_var.get().strip()
+        
+        # 如果名字没有实质性变化，不处理
+        if new_name == self.current_student_name:
+            return
+        
+        # 如果正在抢课，不允许切换
+        if selection_running:
+            # 注意：因为是延时触发，这里最好不要弹窗打断用户，直接回滚即可
+            # 或者仅在日志中提示
+            if self.student_switch_lock: 
+                return
+            self.student_switch_lock = True
+            self.student_name_var.set(self.current_student_name)
+            self.student_switch_lock = False
+            print("⚠️ 正在抢课中，忽略人员切换请求")
+            return
+        
+        # === 以下是原有的切换逻辑 ===
+        
+        # 保存当前人员的课程列表（如果有）
+        if self.current_student_name:
+            print(f"💾 切换人员：保存 {self.current_student_name} 的课程列表")
+            self.save_course_list(self.current_student_name)
+        
+        # 更新当前人员
+        self.current_student_name = new_name
+        
+        # 加载新人员的课程列表
+        if new_name:
+            print(f"📂 切换人员：加载 {new_name} 的课程列表")
+            self.load_saved_course_list(new_name)
+            self.status_var.set(f"已切换到 {new_name}")
+        else:
+            # 如果清空了姓名，也清空课程列表
+            global course_data_list, course_id_count
+            course_data_list = []
+            course_id_count = 0
+            self.update_course_list()
+            self.status_var.set("请输入抢课人员姓名")
     def auto_save_course_list(self):
         """自动保存课程列表（用于异常关闭）"""
         while True:
-            time.sleep(30)  # 每30秒自动保存一次
+            time.sleep(30)
             if selection_running or stop_selection:
-                continue  # 选课过程中不自动保存
-            self.save_course_list()
+                continue
+            if self.current_student_name:
+                self.save_course_list()
 
     def on_closing(self):
         """处理窗口关闭事件"""
         global stop_display, stop_selection
-        # 停止显示二维码
         stop_display = True
-        # 停止选课
+        
         if selection_running:
             stop_selection = True
             print("🛑 正在停止选课进程...")
-            # 等待选课进程停止
             time.sleep(1)
         
-        # 停止会话保持线程
         self.stop_online_keepalive()
         
-        # 保存课程列表
-        self.save_course_list()
+        # 保存当前人员的课程列表
+        if self.current_student_name:
+            self.save_course_list()
         print("👋 程序即将关闭，已保存数据")
         self.root.destroy()
 
     def configure_browser(self):
-        # 浏览器选项
         self.chrome_options = Options()
-        self.chrome_options.add_argument("--headless=new")  # 可选：无头模式
+        self.chrome_options.add_argument("--headless=new")
         self.chrome_options.add_argument("--disable-gpu")
         self.chrome_options.add_argument("--no-sandbox")
         self.chrome_options.add_argument("--disable-blink-features=AutomationControlled")
@@ -316,24 +439,20 @@ class CourseSelectionApp:
         login_frame = ttk.Frame(self.login_tab, style="TFrame")
         login_frame.pack(padx=20, pady=20, fill="both", expand=True)
         
-        # 标题
         title_label = ttk.Label(login_frame, text="北京科技大学选课助手登录", style="Header.TLabel")
         title_label.pack(pady=(0, 20))
         
-        # 二维码框架
         self.qr_frame = ttk.Frame(login_frame, style="TFrame")
         self.qr_frame.pack(pady=10)
         
         self.qr_label = ttk.Label(self.qr_frame, text="等待二维码生成...")
         self.qr_label.pack(pady=20)
         
-        # 状态
         self.status_var = tk.StringVar()
         self.status_var.set("等待操作...")
         status_label = ttk.Label(login_frame, textvariable=self.status_var, foreground="blue")
         status_label.pack(pady=10)
         
-        # 按钮
         btn_frame = ttk.Frame(login_frame, style="TFrame")
         btn_frame.pack(pady=20)
         
@@ -343,23 +462,20 @@ class CourseSelectionApp:
     def update_console(self):
         """优化后的控制台输出更新，减少CPU占用并处理窗口状态"""
         last_update = time.time()
-        MIN_UPDATE_INTERVAL = 0.1  # 最小更新间隔(秒)
+        MIN_UPDATE_INTERVAL = 0.1
         
         while True:
             try:
-                # 检查窗口是否最小化，如果是则减少更新频率
                 is_minimized = getattr(self, 'window_minimized', False)
                 update_interval = 1.0 if is_minimized else MIN_UPDATE_INTERVAL
                 
-                # 检查是否达到最小更新间隔
                 current_time = time.time()
                 if current_time - last_update < update_interval:
                     time.sleep(max(0.01, update_interval - (current_time - last_update)))
                     continue
                     
-                # 处理消息队列
                 messages = []
-                for _ in range(20):  # 每次最多处理20条消息
+                for _ in range(20):
                     try:
                         msg = log_queue.get_nowait()
                         messages.append(msg)
@@ -371,10 +487,8 @@ class CourseSelectionApp:
                     for msg in messages:
                         self.console_output.insert(tk.END, '\n' + msg.strip())
                     
-                    # 滚动到最新消息
                     self.console_output.see(tk.END)
                     
-                    # 限制显示行数，保留最后50行
                     lines = int(self.console_output.index('end-1c').split('.')[0])
                     if lines > 50:
                         self.console_output.delete(1.0, f"{lines-100}.0")
@@ -382,56 +496,51 @@ class CourseSelectionApp:
                     self.console_output.config(state=tk.DISABLED)
                     last_update = time.time()
                 
-                # 添加基本休眠，避免CPU占用过高
                 time.sleep(0.1)
                 
             except Exception as e:
                 print(f"更新控制台输出时出错：{e}")
-                time.sleep(0.5)  # 出错时增加休眠时间
+                time.sleep(0.5)
+
     def setup_course_tab(self):
         course_frame = ttk.Frame(self.course_tab, style="TFrame")
         course_frame.pack(padx=20, pady=20, fill="both", expand=True)
-        # 标题
+        
         title_label = ttk.Label(course_frame, text="抢课设置", style="Header.TLabel")
         title_label.pack(pady=(0, 20))
 
-        # 创建一个主框架来容纳"抢课人员"和控制台输出
         main_name_frame = ttk.Frame(course_frame, style="TFrame")
         main_name_frame.pack(fill="x", pady=5)
         
-        # 左侧：抢课人员设置
         name_frame = ttk.Frame(main_name_frame, style="TFrame")
         name_frame.pack(side=tk.LEFT, fill="y", expand=False)
         
         ttk.Label(name_frame, text="抢课人员：").pack(side=tk.LEFT, padx=(0, 10))
         self.student_name_var = tk.StringVar(value="") 
+        # 绑定变量变化事件
+        self.student_name_var.trace_add('write', self.on_student_name_change)
         ttk.Entry(name_frame, textvariable=self.student_name_var, width=20).pack(side=tk.LEFT)
         
-        # 右侧：控制台输出展示框
         console_frame = ttk.LabelFrame(main_name_frame, text="实时控制台输出", style="TFrame")
         console_frame.pack(side=tk.RIGHT, fill="both", expand=True, padx=(20, 0))
         
-        # 创建控制台输出文本区域
         self.console_output = scrolledtext.ScrolledText(console_frame, wrap=tk.WORD, height=4)
         self.console_output.pack(fill="both", expand=True, padx=5, pady=5)
         self.console_output.config(state=tk.DISABLED)
         
-        # 队列处理
         self.console_queue = queue.Queue()
         self.update_console_thread = threading.Thread(target=self.update_console, daemon=True)
         self.update_console_thread.start()
 
-        # 课程输入框架
         input_frame = ttk.Frame(course_frame, style="TFrame")
         input_frame.pack(fill="x", pady=10)
         
-        # 课程类型
         type_frame = ttk.Frame(input_frame, style="TFrame")
         type_frame.pack(fill="x", pady=5)
-        # 是否在选到一门课后停止
+        
         stop_on_success_frame = ttk.Frame(input_frame, style="TFrame")
         stop_on_success_frame.pack(fill="x", pady=5)
-        self.stop_on_success_var = tk.BooleanVar(value=True)  # 默认开启（选到一门就停止）
+        self.stop_on_success_var = tk.BooleanVar(value=True)
         stop_on_success_check = ttk.Checkbutton(stop_on_success_frame, 
                                             text="选到一门课后停止选课", 
                                             variable=self.stop_on_success_var)
@@ -446,7 +555,6 @@ class CourseSelectionApp:
         self.course_type_combo.current(0)
         self.course_type_combo.pack(side=tk.LEFT)
         
-        # 课程ID
         id_frame = ttk.Frame(input_frame, style="TFrame")
         id_frame.pack(fill="x", pady=5)
         
@@ -454,7 +562,6 @@ class CourseSelectionApp:
         self.course_id_var = tk.StringVar()
         ttk.Entry(id_frame, textvariable=self.course_id_var, width=20).pack(side=tk.LEFT)
         
-        # 优先级
         priority_frame = ttk.Frame(input_frame, style="TFrame")
         priority_frame.pack(fill="x", pady=5)
         
@@ -463,23 +570,21 @@ class CourseSelectionApp:
         ttk.Spinbox(priority_frame, from_=1, to=99, textvariable=self.priority_var, width=5).pack(side=tk.LEFT)
         ttk.Label(priority_frame, text="（数字越小，优先级越高）").pack(side=tk.LEFT, padx=10)
         
-        # 学期
         semester_frame = ttk.Frame(input_frame, style="TFrame")
         semester_frame.pack(fill="x", pady=5)
         
         ttk.Label(semester_frame, text="学期：").pack(side=tk.LEFT, padx=(0, 10))
-        self.semester_var = tk.StringVar(value="2025-2026-1")
+        self.semester_var = tk.StringVar(value="2025-2026-2")
         ttk.Entry(semester_frame, textvariable=self.semester_var, width=20).pack(side=tk.LEFT)
         
-         # 是否持续重试已满课程
         retry_frame = ttk.Frame(input_frame, style="TFrame")
         retry_frame.pack(fill="x", pady=5)
         
-        self.retry_full_var = tk.BooleanVar(value=True)  # 默认开启
+        self.retry_full_var = tk.BooleanVar(value=True)
         retry_check = ttk.Checkbutton(retry_frame, text="课程已满时持续重试", variable=self.retry_full_var)
         retry_check.pack(side=tk.LEFT)
-        ttk.Label(retry_frame, text="（关闭后，一旦返回“已满”将不再尝试此课程）").pack(side=tk.LEFT, padx=(5, 0))
-        # 按钮
+        ttk.Label(retry_frame, text='（关闭后，一旦返回"已满"将不再尝试此课程）').pack(side=tk.LEFT, padx=(5, 0))
+        
         btn_frame = ttk.Frame(course_frame, style="TFrame")
         btn_frame.pack(pady=10)
         
@@ -492,13 +597,11 @@ class CourseSelectionApp:
         self.stop_auto_btn = ttk.Button(btn_frame, text="停止抢课", command=self.stop_auto_selection, state=tk.DISABLED)
         self.stop_auto_btn.pack(side=tk.LEFT, padx=5)
         
-        # 课程列表
         list_frame = ttk.Frame(course_frame, style="TFrame")
         list_frame.pack(fill="both", expand=True, pady=10)
         
         ttk.Label(list_frame, text="已添加课程：", style="Header.TLabel").pack(anchor="w")
         
-        # 创建表格
         columns = ("id","priority", "name", "teacher", "course_id", "schedule")
         self.course_tree = ttk.Treeview(
             list_frame, 
@@ -507,10 +610,8 @@ class CourseSelectionApp:
             selectmode="extended"
         )
         
-        # 添加窗口大小变化时的优化处理
         self.course_tree.bind("<Configure>", self.on_treeview_configure)
                 
-        # 定义列名
         self.course_tree.heading("id", text="序号")
         self.course_tree.heading("priority", text="优先级")
         self.course_tree.heading("name", text="课程名称")
@@ -518,8 +619,6 @@ class CourseSelectionApp:
         self.course_tree.heading("course_id", text="课程ID")
         self.course_tree.heading("schedule", text="上课安排")
         
-        
-        # 设置列宽
         self.course_tree.column("id", width=50)
         self.course_tree.column("priority", width=50)
         self.course_tree.column("name", width=200)
@@ -527,24 +626,21 @@ class CourseSelectionApp:
         self.course_tree.column("id", width=100)
         self.course_tree.column("schedule", width=200)
         
-        # 添加滚动条
         scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.course_tree.yview)
         self.course_tree.configure(yscrollcommand=scrollbar.set)
         
         self.course_tree.pack(side=tk.LEFT, fill="both", expand=True)
         scrollbar.pack(side=tk.RIGHT, fill="y")
         
-        # 删除按钮
         self.remove_course = ttk.Button(list_frame, text="删除选中课程", command=self.remove_course)
         self.remove_course.pack(pady=5)
 
         self.update_course_list()
+
     def on_treeview_configure(self, event):
         """优化表格重绘，减少窗口调整大小时的卡顿"""
-        # 暂时禁用表格重绘
         self.course_tree.grid_remove()
         
-        # 延迟恢复重绘，等待窗口大小稳定
         if hasattr(self, '_treeview_after_id'):
             self.root.after_cancel(self._treeview_after_id)
         
@@ -563,60 +659,52 @@ class CourseSelectionApp:
     def start_login(self):
         global login_success, stop_display
         
-        # 重置标志
         login_success = False
         stop_display = False
         
         self.login_btn.config(state=tk.DISABLED)
         self.status_var.set("正在启动登录流程...")
         
-        # 启动登录线程
         login_thread = threading.Thread(target=self.login_process, daemon=True)
         login_thread.start()
         
     def login_process(self):
         global driver, login_success, final_cookies_dict
-        
         try:
-            # 初始化浏览器
-            driver = webdriver.Chrome(service=self.service, options=self.chrome_options)
-            
-            # 打开首页
-            home_url = "https://byyt.ustb.edu.cn/oauth/login/code"
-            driver.get(home_url.strip())
+            print("🔄 正在检查并下载匹配的 ChromeDriver...")
+            self.status_var.set("正在下载/匹配 ChromeDriver...")
+
+            driver_path = ChromeDriverManager().install()
+            print(f"✅ 使用 ChromeDriver: {driver_path}")
+
+            service = Service(driver_path)
+            driver = webdriver.Chrome(service=service, options=self.chrome_options)
+
+            driver.get("https://byyt.ustb.edu.cn/oauth/login/code")
             print("🌐 已进入登录页面")
             self.status_var.set("等待二维码生成...")
             time.sleep(0.2)
-            
-            # 启动二维码显示线程
+
             display_thread = threading.Thread(target=self.display_qr_thread, daemon=True)
             display_thread.start()
-            
-            # 启动登录状态监控线程
+
             monitor_thread = threading.Thread(target=self.monitor_login_status, daemon=True)
             monitor_thread.start()
-            
-            # 等待登录结果
+
             while not login_success and not stop_display:
                 time.sleep(0.1)
-            # print("🛑 正在关闭浏览器...")
 
             driver.quit()
+
             if login_success:
                 self.status_var.set("登录成功！")
                 messagebox.showinfo("登录成功", "您已成功登录！")
-                
-                # 启用选课选项卡
                 self.tab_control.tab(1, state="normal")
                 self.tab_control.select(1)
-                
             else:
                 self.status_var.set("登录失败或已取消")
                 messagebox.showerror("登录失败", "登录过程失败或被取消")
-                
-            # 关闭浏览器
-           
-            
+
         except Exception as e:
             error_msg = f"登录出错：{str(e)}"
             print(f"❌ {error_msg}")
@@ -628,17 +716,15 @@ class CourseSelectionApp:
     def display_qr_thread(self):
         global current_img_data, stop_display
         last_update = time.time()
-        MIN_UPDATE_INTERVAL = 0.2  # 最小更新间隔(秒)
+        MIN_UPDATE_INTERVAL = 0.2
         
         while not stop_display:
-            # 检查窗口是否最小化
             if getattr(self, 'window_minimized', False):
-                time.sleep(1.0)  # 最小化时大幅增加休眠时间
+                time.sleep(1.0)
                 continue
                 
             if current_img_data is not None:
                 try:
-                    # 检查是否达到最小更新间隔
                     current_time = time.time()
                     if current_time - last_update >= MIN_UPDATE_INTERVAL:
                         tk_image = ImageTk.PhotoImage(current_img_data)
@@ -647,13 +733,12 @@ class CourseSelectionApp:
                 except Exception as e:
                     print(f"显示二维码时出错：{e}")
             
-            # 添加基本休眠，避免CPU占用过高
             time.sleep(0.05)
             
     def update_qr_image(self, image):
         try:
             self.qr_label.config(image=image)
-            self.qr_label.image = image  # 保持引用
+            self.qr_label.image = image
             self.status_var.set("请使用手机扫描二维码")
         except Exception as e:
             print(f"更新二维码时出错：{e}")
@@ -664,7 +749,6 @@ class CourseSelectionApp:
         print("🔄 正在监控二维码与登录状态...")
         while not login_success and not stop_display:
             try:
-                # 检查是否在 iframe（二维码阶段）
                 try:
                     iframe = driver.find_element(By.TAG_NAME, "iframe")
                     driver.switch_to.frame(iframe)
@@ -679,15 +763,14 @@ class CourseSelectionApp:
                     driver.switch_to.default_content()
                 except Exception as e:
                     driver.switch_to.default_content()
-                # 检查是否跳转到目标页面
+                    
                 if "https://byyt.ustb.edu.cn/authentication/main" in driver.current_url:
                     print(f"\n🎉 检测到登录成功！")
                     self.status_var.set("登录成功！正在获取 Cookie...")
                     time.sleep(0.1)
-                    # 提取关键 Cookie
                     cookies = driver.get_cookies()
                     final_cookies_dict = {c['name']: c['value'] for c in cookies}
-                    print(f"\n🔐 已获取 {len(final_cookies_dict)} 个 Cookie")
+                    print(f"\n🔑 已获取 {len(final_cookies_dict)} 个 Cookie")
                     print(final_cookies_dict)
                     login_success = True
                     self.start_online_keepalive()
@@ -701,12 +784,15 @@ class CourseSelectionApp:
     def add_course(self):
         global final_cookies_dict, course_data_list
         
-        # 检查是否已登录
+        # 检查是否已输入抢课人员
+        if not self.current_student_name:
+            messagebox.showerror("错误", "请先输入抢课人员姓名")
+            return
+        
         if not final_cookies_dict:
             messagebox.showerror("错误", "请先登录")
             return
             
-        # 获取输入值
         course_type_text = self.course_type_var.get()
         if course_type_text == "素质扩展课":
             p_xkfsdm = "sztzk-b-b"
@@ -744,7 +830,6 @@ class CourseSelectionApp:
         p_dqxq = p_xq
         p_dqxnxq = p_xnxq
         
-        # 查询课程信息
         print(f"🔍 正在查询课程 {course_id} 的信息...")
         self.status_var.set(f"正在查询课程 {course_id}...")
 
@@ -758,22 +843,18 @@ class CourseSelectionApp:
     def query_course_info(self, course_id, p_xn, p_xq, p_xnxq, p_dqxn, p_dqxq, p_dqxnxq, p_xkfsdm, priority):
         global final_cookies_dict, course_data_list
         
-        # 构建缓存键 - 使用学期格式：p_xn+p_xq (如: "2023-20241")
         semester = f"{p_xn}{p_xq}"
         cache_key = f"{semester}_{course_id}"
         
-        # 检查缓存
         cached_course = self.get_cached_course(course_id, semester)
         if cached_course:
             print(f"ℹ️ 从缓存中获取课程 {course_id} 的信息")
-            # 使用缓存数据
             course_name = cached_course["name"]
             teacher = cached_course["teacher"]
             p_id = cached_course["p_id"]
             p_kclb = cached_course["p_kclb"]
             course_schedule = cached_course["schedule"]
             
-            # 保存课程数据
             course_data = {
                 "priority": priority,
                 "data": {
@@ -791,6 +872,10 @@ class CourseSelectionApp:
                 "id": len(course_data_list) + 1
             }
             course_data_list.append(course_data)
+            
+            # 添加课程后立即保存
+            self.save_course_list()
+            
             self.root.after(0, lambda: self.update_course_list())
             self.root.after(0, lambda: messagebox.showinfo("成功", f"已添加课程：{course_name}（来自缓存）"))
             self.root.after(0, lambda: self.status_var.set("课程添加成功"))
@@ -859,28 +944,27 @@ class CourseSelectionApp:
                 print(f"⚠️ {error_msg}")
                 self.root.after(0, lambda: messagebox.showerror("错误", error_msg))
                 return
+                
             course_total = coursedata['kxrwList']['total']
             course_info = coursedata['kxrwList']['list']
             global course_id_count
+            
             for course in course_info:
                 course_id_count+=1
                 course_name = course["kcmc"]
                 teacher = course["dgjsmc"]
                 p_id = course["id"]
-                p_kclb = course.get("kclbdm", "2301")  # 默认值
+                p_kclb = course.get("kclbdm", "2301")
                 kcxx_html = course["kcxx"]
                 soup = BeautifulSoup(kcxx_html, 'html.parser')
-                # 查找 class 包含 "ivu-tag-cyan" 的 div（上课信息容器）
                 tag_cyan = soup.find('div', class_='ivu-tag-cyan')
                 if tag_cyan:
-                    # 在容器内查找 class="ivu-tag-text" 的 span
                     tag_text = tag_cyan.find('span', class_='ivu-tag-text')
                     if tag_text:
-                        # 提取 span 内部的文本（包含目标上课信息）
                         schedule = tag_text.get_text(strip=True)
                 course_schedule=schedule
                 print(f"✅ 找到课程：{course_name} | 教师：{teacher} | ID：{p_id} | 课程安排：{course_schedule}")
-                # 保存课程数据
+                
                 course_data = {
                     "priority": priority,
                     "data": {
@@ -911,6 +995,9 @@ class CourseSelectionApp:
                     }
                 )
 
+                # 添加课程后立即保存
+                self.save_course_list()
+
                 self.root.after(0, lambda: self.update_course_list())
                 self.root.after(0, lambda: messagebox.showinfo("成功", f"已添加课程：{course_name}"))
                 self.root.after(0, lambda: self.status_var.set("课程添加成功"))
@@ -922,17 +1009,14 @@ class CourseSelectionApp:
             self.root.after(0, lambda: messagebox.showerror("错误", error_msg))
             
     def update_course_list(self):
-        # 清空列表
         try:
             for item in self.course_tree.get_children():
                 self.course_tree.delete(item)
         except Exception as e:
             print(f"清空课程列表时出错：{e}")
         
-        # 按优先级排序
         sorted_courses = sorted(course_data_list, key=lambda x: x["priority"])
         
-        # 添加到表格
         for course in sorted_courses:
             self.course_tree.insert("", "end", values=(
                 course["id"],
@@ -951,7 +1035,6 @@ class CourseSelectionApp:
             messagebox.showwarning("警告", "请先选择要删除的课程")
             return
 
-        # 获取要删除的课程名称用于提示
         deleted_names = []
         ids_to_remove = []
 
@@ -962,7 +1045,7 @@ class CourseSelectionApp:
             ids_to_remove.append(course_id)
             deleted_names.append(course_name)
 
-        # 可选：弹出确认框
+        # 弹出确认框
         if len(deleted_names) > 1:
             confirm = messagebox.askyesno("确认删除", f"确定要删除以下 {len(deleted_names)} 门课程吗？\n\n" + "\n".join(deleted_names))
         else:
@@ -974,6 +1057,9 @@ class CourseSelectionApp:
         # 从 course_data_list 中移除对应课程
         course_data_list = [c for c in course_data_list if c["id"] not in ids_to_remove]
 
+        # 【核心修改】删除操作后立即保存当前人员的课程列表
+        self.save_course_list()
+
         # 刷新表格
         self.update_course_list()
 
@@ -982,6 +1068,7 @@ class CourseSelectionApp:
             messagebox.showinfo("成功", f"已删除 {len(deleted_names)} 门课程")
         else:
             messagebox.showinfo("成功", f"已删除课程：{deleted_names[0]}")
+
     def start_auto_selection(self):
         global course_data_list, final_cookies_dict, selection_running, stop_selection
 
@@ -992,10 +1079,15 @@ class CourseSelectionApp:
         if not final_cookies_dict:
             messagebox.showerror("错误", "请先登录")
             return
+        
+        # 检查是否选择了人员（虽然add时检查过，但防止清空）
+        if not self.current_student_name:
+            messagebox.showerror("错误", "请确认抢课人员姓名")
+            return
             
         course_data_list.sort(key=lambda x: x["priority"])
         
-        msg = "即将开始自动选课，课程如下：\n\n"
+        msg = f"即将开始为【{self.current_student_name}】自动选课，课程如下：\n\n"
         for i, course in enumerate(course_data_list):
             msg += f"{i+1}. [优先级 {course['priority']}] {course['name']} ({course['teacher']})\n"
         msg += "\n是否继续？"
@@ -1010,8 +1102,12 @@ class CourseSelectionApp:
         # === 禁用无关按钮 ===
         self.add_course_btn.config(state=tk.DISABLED)
         self.start_auto_btn.config(state=tk.DISABLED)
-        self.remove_course.config(state=tk.DISABLED)  # 如果你有这个按钮引用
+        self.remove_course.config(state=tk.DISABLED)
+        self.student_name_var.set(self.current_student_name) # 锁定输入框显示
         self.stop_auto_btn.config(state=tk.NORMAL)
+        
+        # 锁定人员切换
+        self.student_switch_lock = True
 
         selection_thread = threading.Thread(target=self.auto_selection_process, daemon=True)
         selection_thread.start()
@@ -1023,150 +1119,148 @@ class CourseSelectionApp:
         self.start_auto_btn.config(state=tk.NORMAL)
         self.remove_course.config(state=tk.NORMAL)
         self.stop_auto_btn.config(state=tk.DISABLED)
+        self.student_switch_lock = False # 解锁人员切换
         self.status_var.set("抢课结束，按钮已恢复")
 
     def auto_selection_process(self):
-            global course_data_list, final_cookies_dict, selection_running, stop_selection
+        global course_data_list, final_cookies_dict, selection_running, stop_selection
 
-            print("\n🚀 开始自动选课...")
-            self.status_var.set("自动选课已启动")
+        print(f"\n🚀 开始为 {self.current_student_name} 自动选课...")
+        self.status_var.set("自动选课已启动")
 
-            session = requests.Session()
-            session.cookies.update(final_cookies_dict)
-            session.headers.update({
-                "Accept": "*/*",
-                "Accept-Encoding": "gzip, deflate, br, zstd",
-                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                "Host": "byyt.ustb.edu.cn",
-                "Origin": "https://byyt.ustb.edu.cn",
-                "Pragma": "no-cache",
-                "Referer": "https://byyt.ustb.edu.cn/Xsxk/query/1",
-                "User-Agent": "Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Mobile Safari/537.36 Edg/139.0.0.0",
-                "X-Requested-With": "XMLHttpRequest"
-            })
+        session = requests.Session()
+        session.cookies.update(final_cookies_dict)
+        session.headers.update({
+            "Accept": "*/*",
+            "Accept-Encoding": "gzip, deflate, br, zstd",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "Host": "byyt.ustb.edu.cn",
+            "Origin": "https://byyt.ustb.edu.cn",
+            "Pragma": "no-cache",
+            "Referer": "https://byyt.ustb.edu.cn/Xsxk/query/1",
+            "User-Agent": "Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Mobile Safari/537.36 Edg/139.0.0.0",
+            "X-Requested-With": "XMLHttpRequest"
+        })
 
-            url = "https://byyt.ustb.edu.cn/Xsxk/addGouwuche"
-            count = 0
-            success = False
+        url = "https://byyt.ustb.edu.cn/Xsxk/addGouwuche"
+        count = 0
+        success = False
 
-            try:
-                # 按优先级分组
-                priority_groups = defaultdict(list)
-                for course in sorted(course_data_list, key=lambda x: x["priority"]):
-                    priority_groups[course["priority"]].append(course)
+        try:
+            # 按优先级分组
+            priority_groups = defaultdict(list)
+            for course in sorted(course_data_list, key=lambda x: x["priority"]):
+                priority_groups[course["priority"]].append(course)
 
-                # 记录已因“冲突”或“已满+不重试”而放弃的课程 ID
-                failed_course_ids = set()
+            # 记录已因“冲突”或“已满+不重试”而放弃的课程 ID
+            failed_course_ids = set()
 
-                # 按优先级从高到低处理
-                for priority in sorted(priority_groups.keys()):
-                    courses = priority_groups[priority]
-                    print(f"🎯 开始抢优先级 {priority} 的课程，共 {len(courses)} 门：")
-                    for c in courses:
-                        print(f"   → {c['name']} ({c['teacher']})")
+            # 按优先级从高到低处理
+            for priority in sorted(priority_groups.keys()):
+                courses = priority_groups[priority]
+                print(f"🎯 开始抢优先级 {priority} 的课程，共 {len(courses)} 门：")
+                for c in courses:
+                    print(f"   → {c['name']} ({c['teacher']})")
 
-                    if stop_selection:
-                        break
+                if stop_selection:
+                    break
 
-                    while not success and not stop_selection:
-                        current_time = datetime.now()
-                        minute = current_time.minute
-                        if minute == 59:
-                            time.sleep(max(58.5-current_time.second,0))
+                while not success and not stop_selection:
+                    current_time = datetime.now()
+                    minute = current_time.minute
+                    if minute == 59:
+                        time.sleep(max(58.5-current_time.second,0))
+                        continue
+
+                    any_active_in_priority = False  # 当前优先级是否有可抢的课
+
+                    for course in courses:
+                        course_id = course["data"]["p_id"]
+
+                        # 如果这门课已经失败过（冲突或已满且不重试），跳过
+                        if course_id in failed_course_ids:
                             continue
 
-                        any_active_in_priority = False  # 当前优先级是否有可抢的课
-
-                        for course in courses:
-                            course_id = course["data"]["p_id"]
-
-                            # 如果这门课已经失败过（冲突或已满且不重试），跳过
-                            if course_id in failed_course_ids:
-                                continue
-
-                            time.sleep(1.5)
-                            if stop_selection:
-                                break
-
-                            try:
-                                response = session.post(url, data=course["data"])
-                                count += 1
-                                text = response.text.strip()
-
-                                print(f"[{count}] 优先级 {priority} | 课程：{course['name']} | 状态：{response.status_code} | 响应：{text[:160]}...")
-
-                                if "success" in text or "成功" in text:
-                                    success_msg = f"🎉 选课成功！课程：{course['name']} | 教师：{course['teacher']}"
-                                    print(success_msg)
-                                    # 关键修改：根据用户选择决定是否继续
-                                    if self.stop_on_success_var.get():
-                                        success = True  # 原有逻辑：设置成功标志
-                                        self.root.after(0, lambda msg=success_msg: messagebox.showinfo("成功", msg))
-                                        self.root.after(0, lambda: self.status_var.set("选课成功！"))
-                                        break  # 跳出当前优先级的课程循环
-                                    else:
-                                        print("⏩ 选课成功，但将继续尝试其他课程...")
-                                        # 不设置success标志，继续尝试其他课程
-                                        # 可以将这门课标记为已成功，避免重复尝试
-                                        failed_course_ids.add(course_id)
-                                        continue
-                                    break
-                                elif "冲突" in text:
-                                    print(f"⛔ 时间冲突，放弃课程：{course['name']}（不再尝试）")
-                                    failed_course_ids.add(course_id)  # 标记为失败，不再尝试
-                                    continue  # 继续尝试同优先级其他课程
-                                elif "不符合" in text:
-                                    print(f"⛔ 不符合要求，放弃课程：{course['name']}（不再尝试）")
-                                    failed_course_ids.add(course_id)  # 标记为失败，不再尝试
-                                    continue  # 继续尝试同优先级其他课程
-                                elif "full" in text or "已满" in text:
-                                    retry_enabled = self.retry_full_var.get()
-                                    if not retry_enabled:
-                                        print(f"🚫 课程已满且“不重试”，放弃课程：{course['name']}（不再尝试）")
-                                        failed_course_ids.add(course_id)
-                                    else:
-                                        print(f"⏸️ 课程已满：{course['name']}，等待下次重试...")
-                                        any_active_in_priority = True  # 表示这门课还在重试
-                                    continue  # 继续下一轮循环
-                                else:
-                                    print(f"⚠️ 未知响应（可能可抢）：{text[:100]}...")
-                                    any_active_in_priority = True  # 可能还能抢，保持活跃
-
-                            except Exception as e:
-                                print(f"[{count}] 请求失败（{course['name']}）：{e}")
-                                any_active_in_priority = True  # 可能网络波动，保持尝试
-
-                        # 检查是否当前优先级还有可尝试的课程
-                        remaining_courses = [c for c in courses if c["data"]["p_id"] not in failed_course_ids]
-                        if not remaining_courses:
-                            print(f"⏸️ 优先级 {priority} 所有课程均已失败或放弃，进入下一优先级...")
-                            break  # 跳出 while，进入下一优先级
-
-                        # 如果没有活跃课程（全部失败/放弃），也跳出
-                        if not any_active_in_priority and not success:
-                            print(f"⏸️ 优先级 {priority} 无活跃课程可抢，进入下一优先级...")
+                        time.sleep(1.5)
+                        if stop_selection:
                             break
 
-                    if success or stop_selection:
+                        try:
+                            response = session.post(url, data=course["data"])
+                            count += 1
+                            text = response.text.strip()
+
+                            print(f"[{count}] 优先级 {priority} | 课程：{course['name']} | 状态：{response.status_code} | 响应：{text[:160]}...")
+
+                            if "success" in text or "成功" in text:
+                                success_msg = f"🎉 选课成功！课程：{course['name']} | 教师：{course['teacher']}"
+                                print(success_msg)
+                                if self.stop_on_success_var.get():
+                                    success = True
+                                    self.root.after(0, lambda msg=success_msg: messagebox.showinfo("成功", msg))
+                                    self.root.after(0, lambda: self.status_var.set("选课成功！"))
+                                    break
+                                else:
+                                    print("⏩ 选课成功，但将继续尝试其他课程...")
+                                    failed_course_ids.add(course_id)
+                                    continue
+                                break
+                            elif "冲突" in text:
+                                print(f"⛔ 时间冲突，放弃课程：{course['name']}（不再尝试）")
+                                failed_course_ids.add(course_id)
+                                continue
+                            elif "不符合" in text:
+                                print(f"⛔ 不符合要求，放弃课程：{course['name']}（不再尝试）")
+                                failed_course_ids.add(course_id)
+                                continue
+                            elif "full" in text or "已满" in text:
+                                retry_enabled = self.retry_full_var.get()
+                                if not retry_enabled:
+                                    print(f"🚫 课程已满且“不重试”，放弃课程：{course['name']}（不再尝试）")
+                                    failed_course_ids.add(course_id)
+                                else:
+                                    print(f"⏸️ 课程已满：{course['name']}，等待下次重试...")
+                                    any_active_in_priority = True
+                                continue
+                            else:
+                                print(f"⚠️ 未知响应（可能可抢）：{text[:100]}...")
+                                any_active_in_priority = True
+
+                        except Exception as e:
+                            print(f"[{count}] 请求失败（{course['name']}）：{e}")
+                            any_active_in_priority = True
+
+                    # 检查是否当前优先级还有可尝试的课程
+                    remaining_courses = [c for c in courses if c["data"]["p_id"] not in failed_course_ids]
+                    if not remaining_courses:
+                        print(f"⏸️ 优先级 {priority} 所有课程均已失败或放弃，进入下一优先级...")
                         break
 
-                if not success:
-                    print("🔚 所有课程均已满或失败，抢课结束。")
-                    self.root.after(0, lambda: self.status_var.set("所有课程均已满或失败，抢课结束"))
+                    if not any_active_in_priority and not success:
+                        print(f"⏸️ 优先级 {priority} 无活跃课程可抢，进入下一优先级...")
+                        break
 
-            except Exception as e:
-                error_msg = f"自动选课出错：{e}"
-                print(f"❌ {error_msg}")
-                self.root.after(0, lambda: messagebox.showerror("错误", error_msg))
-                self.root.after(0, lambda: self.status_var.set("选课失败"))
+                if success or stop_selection:
+                    break
 
-            finally:
-                self.root.after(0, self.restore_buttons)
-                selection_running = False
-                stop_selection = False
+            if not success:
+                print("🔚 所有课程均已满或失败，抢课结束。")
+                self.root.after(0, lambda: self.status_var.set("所有课程均已满或失败，抢课结束"))
+
+        except Exception as e:
+            error_msg = f"自动选课出错：{e}"
+            print(f"❌ {error_msg}")
+            self.root.after(0, lambda: messagebox.showerror("错误", error_msg))
+            self.root.after(0, lambda: self.status_var.set("选课失败"))
+
+        finally:
+            self.root.after(0, self.restore_buttons)
+            selection_running = False
+            stop_selection = False
+
     def stop_auto_selection(self):
         global selection_running, stop_selection
         if not selection_running:
@@ -1175,6 +1269,7 @@ class CourseSelectionApp:
         stop_selection = True
         self.status_var.set("正在停止抢课...")
         print("🛑 用户请求停止抢课")
+
     def start_online_keepalive(self):
         """启动保持在线的后台线程"""
         global online_thread_running
@@ -1252,11 +1347,12 @@ class CourseSelectionApp:
                 print(f"⚠️ online请求失败，状态码：{response.status_code}")
         except Exception as e:
             print(f"❌ 发送online请求时出错：{str(e)}")
-            # 如果出现异常，可能是会话已过期
             if "401" in str(e) or "403" in str(e):
                 print("⚠️ 可能会话已过期，建议重新登录")
+
 # 启动应用
 if __name__ == "__main__":
     root = tk.Tk()
     app = CourseSelectionApp(root)
     root.mainloop()
+
