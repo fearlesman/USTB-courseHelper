@@ -692,7 +692,7 @@ class CourseSelectionApp:
 
             while not login_success and not stop_display:
                 time.sleep(0.1)
-
+            time.sleep(1)
             driver.quit()
 
             if login_success:
@@ -1252,8 +1252,6 @@ class CourseSelectionApp:
                                 # ⏳ 尚未到选课时间，继续重试（不放弃，保持活跃）
                                 print(f"⏳ 选课时间未到：{course['name']}，持续等待中...")
                                 any_active_in_priority = True
-                                # 可选：防止过于频繁请求（比如每门课至少隔2秒）
-                                time.sleep(0.5)
                                 continue
 
                             else:
@@ -1322,25 +1320,29 @@ class CourseSelectionApp:
                 print("✅ 会话保持线程已结束")
                 
     def online_keepalive_thread(self):
-        """保持在线的后台线程"""
+        """增强版保活线程：业务层保活 + 底层心跳"""
         global online_thread_running, login_success
-        
-        print("⏳ 会话保持线程已启动，等待10分钟后发送首次请求...")
+        print("🔄 保活线程启动：每6分钟业务保活 + 每10分钟底层心跳")
+
+        last_business_time = time.time()  # 业务保活（访问 /Xsxk/query/1）
+        last_online_time = time.time()   # 底层心跳（/component/online）
+
         while online_thread_running:
-            # 等待10分钟
-            for _ in range(300):  # 600秒 = 10分钟
-                if not online_thread_running:
-                    break
-                time.sleep(1)
-            
-            if not online_thread_running:
-                break
-                
-            # 检查是否已登录
-            if login_success:
-                self.send_online_request()
-            else:
-                print("ℹ️ 未登录，跳过online请求")
+            now = time.time()
+
+            # 🔹 业务保活：每 6 分钟访问选课主页
+            if now - last_business_time >= 360:  # 360s = 6min
+                if login_success:
+                    self.send_business_keepalive()
+                last_business_time = now
+
+            # 🔹 底层心跳：每 10 分钟 /component/online
+            if now - last_online_time >= 600:  # 600s = 10min
+                if login_success:
+                    self.send_online_request()
+                last_online_time = now
+
+            time.sleep(1)  # 避免忙等待
                 
     def send_online_request(self):
         """发送保持在线的请求"""
@@ -1380,7 +1382,60 @@ class CourseSelectionApp:
             print(f"❌ 发送online请求时出错：{str(e)}")
             if "401" in str(e) or "403" in str(e):
                 print("⚠️ 可能会话已过期，建议重新登录")
+    def handle_session_expired(self):
+        """处理 session 失效：提示用户 + 停止抢课 + 禁用选课页"""
+        global selection_running, stop_selection
+        print("🚨 检测到会话失效！正在清理状态...")
+        self.root.after(0, lambda: messagebox.showwarning(
+            "会话过期", 
+            "检测到登录会话已失效！\n请重新登录后再开始抢课。"
+        ))
+        # 停止抢课（如果正在运行）
+        if selection_running:
+            stop_selection = True
+            self.root.after(0, self.restore_buttons)
+        # 禁用选课选项卡
+        self.root.after(0, lambda: self.tab_control.tab(1, state="disabled"))
+        self.root.after(0, lambda: self.tab_control.select(0))
+        self.root.after(0, lambda: self.status_var.set("会话已过期，请重新登录"))
+    def send_business_keepalive(self):
+        """发送业务层保活请求：访问选课主页，维持会话有效性"""
+        global final_cookies_dict, login_success
+        if not login_success or not final_cookies_dict:
+            print("ℹ️ 未登录或无 Cookie，跳过业务保活")
+            return
 
+        try:
+            url = "https://byyt.ustb.edu.cn/Xsxk/query/1"
+            headers = {
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                "Connection": "keep-alive",
+                "Referer": "https://byyt.ustb.edu.cn/authentication/main",
+                "User-Agent": "Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Mobile Safari/537.36 Edg/139.0.0.0",
+                "Upgrade-Insecure-Requests": "1"
+            }
+            session = requests.Session()
+            session.cookies.update(final_cookies_dict)
+            session.headers.update(headers)
+
+            response = session.get(url, timeout=10)
+            if response.status_code == 200:
+                # 检查是否跳转到登录页（关键！）
+                if "authentication/main" in response.url or "login" in response.text.lower():
+                    print("❌ 业务保活失败：检测到会话已过期（跳转到登录页）")
+                    self.handle_session_expired()
+                elif "选课" in response.text and "queryKxrw" in response.text:
+                    print("✅ 业务保活成功：成功访问选课主页")
+                else:
+                    print(f"⚠️ 业务保活响应异常（状态码 {response.status_code}），内容片段：{response.text[:100]}")
+            else:
+                print(f"⚠️ 业务保活失败：HTTP {response.status_code}")
+        except Exception as e:
+            print(f"❌ 业务保活请求异常：{e}")
+            if "401" in str(e) or "403" in str(e):
+                self.handle_session_expired()
+    
 # 启动应用
 if __name__ == "__main__":
     root = tk.Tk()
