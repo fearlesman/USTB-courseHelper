@@ -21,6 +21,29 @@ from selenium.webdriver.common.by import By
 from bs4 import BeautifulSoup
 from collections import defaultdict
 
+def get_chromedriver_path():
+    # 优先使用手动下载的驱动（放在项目目录的 drivers/ 下）
+    local_driver = os.path.join(os.path.dirname(__file__), "drivers", "chromedriver")
+    if os.name == 'nt':  # Windows
+        local_driver += ".exe"
+    
+    if os.path.exists(local_driver):
+        print(f"✅ 使用本地 ChromeDriver: {local_driver}")
+        return local_driver
+    
+    # 备用：尝试自动下载（可能失败）
+    try:
+        from webdriver_manager.chrome import ChromeDriverManager
+        return ChromeDriverManager().install()
+    except Exception as e:
+        raise RuntimeError(
+            "❌ 无法自动下载 ChromeDriver（网络受限）\n"
+            "👉 请手动下载并放入 drivers/ 目录：\n"
+            "   1. 访问 https://npmmirror.com/mirrors/chromedriver\n"
+            "   2. 根据 Chrome 版本下载对应驱动（如 120.0.6099.109）\n"
+            "   3. 解压 chromedriver.exe 到项目 drivers/ 文件夹"
+        ) from e
+
 # 全局变量
 qr_image_url = None
 current_img_data = None
@@ -200,14 +223,30 @@ class CourseSelectionApp:
             print(f"⚠️ 保存课程缓存失败: {e}")
 
     def get_cached_course(self, course_id, semester):
-        """获取缓存的课程信息"""
+        """获取缓存的课程信息 - 修改版：返回课程列表"""
         cache_key = f"{semester}_{course_id}"
-        return self.course_cache.get(cache_key)
+        cached_data = self.course_cache.get(cache_key)
+        
+        # 兼容旧版本：如果缓存是单个dict，转换为list
+        if cached_data and isinstance(cached_data, dict):
+            return [cached_data]
+        
+        return cached_data  # 返回列表或None
 
     def cache_course_info(self, course_id, semester, course_info):
-        """缓存课程信息"""
+        """缓存课程信息 - 修改版：支持同一课程ID的多门课"""
         cache_key = f"{semester}_{course_id}"
-        self.course_cache[cache_key] = course_info
+        
+        # 如果该课程ID已存在缓存，追加到列表；否则创建新列表
+        if cache_key in self.course_cache:
+            # 检查是否已存在相同的p_id，避免重复
+            existing_p_ids = {course['p_id'] for course in self.course_cache[cache_key]}
+            if course_info['p_id'] not in existing_p_ids:
+                self.course_cache[cache_key].append(course_info)
+        else:
+            # 新课程ID，创建列表
+            self.course_cache[cache_key] = [course_info]
+        
         self.save_course_cache()
 
     def get_student_course_file(self, student_name):
@@ -584,13 +623,44 @@ class CourseSelectionApp:
         retry_check.pack(side=tk.LEFT)
         ttk.Label(retry_frame, text='（关闭后，一旦返回"已满"将不再尝试此课程）').pack(side=tk.LEFT, padx=(5, 0))
         
+        # 抢课模式选择框架
+        mode_frame = ttk.Frame(input_frame, style="TFrame")
+        mode_frame.pack(fill="x", pady=5)
+        
+        ttk.Label(mode_frame, text="抢课模式：", style="TLabel").pack(side=tk.LEFT, padx=(0, 10))
+        
+        self.rush_mode_var = tk.StringVar(value="轮询模式")
+        mode_combo = ttk.Combobox(mode_frame, textvariable=self.rush_mode_var, 
+                                  values=["轮询模式", "定时抢课"], 
+                                  state="readonly", width=15)
+        mode_combo.current(0)
+        mode_combo.pack(side=tk.LEFT, padx=(0, 10))
+        mode_combo.bind("<<ComboboxSelected>>", self.on_mode_change)
+        
+        ttk.Label(mode_frame, text="（轮询：持续捡漏；定时：到点开抢）", 
+                  style="TLabel").pack(side=tk.LEFT)
+        
+        # 定时抢课时间输入框架（始终显示，但默认禁用）
+        time_frame = ttk.Frame(input_frame, style="TFrame")
+        time_frame.pack(fill="x", pady=5)
+        
+        ttk.Label(time_frame, text="抢课时间：", style="TLabel").pack(side=tk.LEFT, padx=(0, 10))
+        
+        self.rush_time_var = tk.StringVar(value="10:00:00")
+        self.rush_time_entry = ttk.Entry(time_frame, textvariable=self.rush_time_var, width=15)
+        self.rush_time_entry.pack(side=tk.LEFT, padx=(0, 10))
+        self.rush_time_entry.config(state=tk.DISABLED)  # 默认禁用
+        
+        ttk.Label(time_frame, text="格式: HH:MM:SS (如 10:00:00)", 
+                  style="TLabel").pack(side=tk.LEFT)
+        
         btn_frame = ttk.Frame(course_frame, style="TFrame")
         btn_frame.pack(pady=10)
         
         self.add_course_btn = ttk.Button(btn_frame, text="添加课程", command=self.add_course)
         self.add_course_btn.pack(side=tk.LEFT, padx=5)
 
-        self.start_auto_btn = ttk.Button(btn_frame, text="开始自动选课", command=self.start_auto_selection)
+        self.start_auto_btn = ttk.Button(btn_frame, text="开始轮询", command=self.start_selection)
         self.start_auto_btn.pack(side=tk.LEFT, padx=5)
 
         self.stop_auto_btn = ttk.Button(btn_frame, text="停止抢课", command=self.stop_auto_selection, state=tk.DISABLED)
@@ -631,8 +701,8 @@ class CourseSelectionApp:
         self.course_tree.pack(side=tk.LEFT, fill="both", expand=True)
         scrollbar.pack(side=tk.RIGHT, fill="y")
         
-        self.remove_course = ttk.Button(list_frame, text="删除选中课程", command=self.remove_course)
-        self.remove_course.pack(pady=5)
+        self.remove_course_btn = ttk.Button(list_frame, text="删除选中课程", command=self.remove_course)
+        self.remove_course_btn.pack(pady=5)
 
         self.update_course_list()
 
@@ -673,7 +743,7 @@ class CourseSelectionApp:
             print("🔄 正在检查并下载匹配的 ChromeDriver...")
             self.status_var.set("正在下载/匹配 ChromeDriver...")
 
-            driver_path = ChromeDriverManager().install()
+            driver_path = get_chromedriver_path()
             print(f"✅ 使用 ChromeDriver: {driver_path}")
 
             service = Service(driver_path)
@@ -845,43 +915,49 @@ class CourseSelectionApp:
         semester = f"{p_xn}{p_xq}"
         cache_key = f"{semester}_{course_id}"
         
-        cached_course = self.get_cached_course(course_id, semester)
-        if cached_course:
-            print(f"ℹ️ 从缓存中获取课程 {course_id} 的信息")
-            course_name = cached_course["name"]
-            teacher = cached_course["teacher"]
-            p_id = cached_course["p_id"]
-            p_kclb = cached_course["p_kclb"]
-            course_schedule = cached_course["schedule"]
+        cached_courses = self.get_cached_course(course_id, semester)
+        if cached_courses:
+            print(f"ℹ️ 从缓存中获取课程 {course_id} 的信息（共 {len(cached_courses)} 门课）")
             
             # 获取全局变量
             global course_id_count
             
-            # 使用 course_id_count 生成新的ID
-            new_id = course_id_count + 1
-            course_id_count = new_id
+            added_count = 0
+            for cached_course in cached_courses:
+                course_name = cached_course["name"]
+                teacher = cached_course["teacher"]
+                p_id = cached_course["p_id"]
+                p_kclb = cached_course["p_kclb"]
+                course_schedule = cached_course["schedule"]
+                
+                # 使用 course_id_count 生成新的ID
+                new_id = course_id_count + 1
+                course_id_count = new_id
+                
+                course_data = {
+                    "priority": priority,
+                    "data": {
+                        "p_xktjz": "rwtjzyx",
+                        "p_xn": p_xn,
+                        "p_xq": p_xq,
+                        "p_xkfsdm": p_xkfsdm,
+                        "p_kclb": p_kclb,
+                        "p_id": p_id
+                    },
+                    "name": course_name,
+                    "teacher": teacher,
+                    "course_id": course_id,
+                    "schedule": course_schedule,
+                    "id": new_id
+                }
+                course_data_list.append(course_data)
+                added_count += 1
+                print(f"✅ 已添加：{course_name} | 教师：{teacher} | 时间：{course_schedule}")
             
-            course_data = {
-                "priority": priority,
-                "data": {
-                    "p_xktjz": "rwtjzyx",
-                    "p_xn": p_xn,
-                    "p_xq": p_xq,
-                    "p_xkfsdm": p_xkfsdm,
-                    "p_kclb": p_kclb,
-                    "p_id": p_id
-                },
-                "name": course_name,
-                "teacher": teacher,
-                "course_id": course_id,
-                "schedule": course_schedule,
-                "id": new_id  # 使用新的ID
-            }
-            course_data_list.append(course_data)
             # 添加课程后立即保存
             self.save_course_list()
             self.root.after(0, lambda: self.update_course_list())
-            self.root.after(0, lambda: messagebox.showinfo("成功", f"已添加课程：{course_name}（来自缓存）"))
+            self.root.after(0, lambda ac=added_count: messagebox.showinfo("成功", f"已从缓存添加 {ac} 门课程"))
             self.root.after(0, lambda: self.status_var.set("课程添加成功"))
             return
         
@@ -951,10 +1027,11 @@ class CourseSelectionApp:
                 
             course_total = coursedata['kxrwList']['total']
             course_info = coursedata['kxrwList']['list']
-            #global course_id_count
+            
+            added_count = 0
             
             for course in course_info:
-                course_id_count+=1
+                course_id_count += 1
                 course_name = course["kcmc"]
                 teacher = course["dgjsmc"]
                 p_id = course["id"]
@@ -962,11 +1039,12 @@ class CourseSelectionApp:
                 kcxx_html = course["kcxx"]
                 soup = BeautifulSoup(kcxx_html, 'html.parser')
                 tag_cyan = soup.find('div', class_='ivu-tag-cyan')
+                schedule = "未知时间"
                 if tag_cyan:
                     tag_text = tag_cyan.find('span', class_='ivu-tag-text')
                     if tag_text:
                         schedule = tag_text.get_text(strip=True)
-                course_schedule=schedule
+                course_schedule = schedule
                 print(f"✅ 找到课程：{course_name} | 教师：{teacher} | ID：{p_id} | 课程安排：{course_schedule}")
                 
                 course_data = {
@@ -986,6 +1064,7 @@ class CourseSelectionApp:
                     "id": course_id_count
                 }
                 course_data_list.append(course_data)
+                added_count += 1
 
                 self.cache_course_info(
                     course_id,
@@ -999,12 +1078,12 @@ class CourseSelectionApp:
                     }
                 )
 
-                # 添加课程后立即保存
-                self.save_course_list()
+            # 添加课程后立即保存
+            self.save_course_list()
 
-                self.root.after(0, lambda: self.update_course_list())
-                self.root.after(0, lambda: messagebox.showinfo("成功", f"已添加课程：{course_name}"))
-                self.root.after(0, lambda: self.status_var.set("课程添加成功"))
+            self.root.after(0, lambda: self.update_course_list())
+            self.root.after(0, lambda ac=added_count: messagebox.showinfo("成功", f"已添加 {ac} 门课程"))
+            self.root.after(0, lambda: self.status_var.set("课程添加成功"))
 
             
         except Exception as e:
@@ -1122,9 +1201,16 @@ class CourseSelectionApp:
         # === 禁用无关按钮 ===
         self.add_course_btn.config(state=tk.DISABLED)
         self.start_auto_btn.config(state=tk.DISABLED)
-        self.remove_course.config(state=tk.DISABLED)
+        self.remove_course_btn.config(state=tk.DISABLED)
         self.student_name_var.set(self.current_student_name) # 锁定输入框显示
         self.stop_auto_btn.config(state=tk.NORMAL)
+        
+        # 禁用模式选择和时间输入
+        if hasattr(self, 'rush_mode_var'):
+            for child in self.course_tab.winfo_children():
+                self._disable_combobox_recursive(child)
+        if hasattr(self, 'rush_time_entry'):
+            self.rush_time_entry.config(state=tk.DISABLED)
         
         # 锁定人员切换
         self.student_switch_lock = True
@@ -1137,10 +1223,308 @@ class CourseSelectionApp:
         """恢复按钮状态"""
         self.add_course_btn.config(state=tk.NORMAL)
         self.start_auto_btn.config(state=tk.NORMAL)
-        self.remove_course.config(state=tk.NORMAL)
+        self.remove_course_btn.config(state=tk.NORMAL)
         self.stop_auto_btn.config(state=tk.DISABLED)
+        
+        # 恢复模式选择
+        if hasattr(self, 'rush_mode_var'):
+            for child in self.course_tab.winfo_children():
+                self._enable_combobox_recursive(child)
+        
+        # 恢复时间输入（根据当前模式）
+        if hasattr(self, 'rush_time_entry'):
+            if self.rush_mode_var.get() == "定时抢课":
+                self.rush_time_entry.config(state=tk.NORMAL)
+            else:
+                self.rush_time_entry.config(state=tk.DISABLED)
+        
         self.student_switch_lock = False # 解锁人员切换
         self.status_var.set("抢课结束，按钮已恢复")
+
+    def _disable_combobox_recursive(self, widget):
+        """递归禁用Combobox"""
+        if isinstance(widget, ttk.Combobox) and widget['textvariable'] == str(self.rush_mode_var):
+            widget.config(state=tk.DISABLED)
+        for child in widget.winfo_children():
+            self._disable_combobox_recursive(child)
+
+    def _enable_combobox_recursive(self, widget):
+        """递归启用Combobox"""
+        if isinstance(widget, ttk.Combobox) and widget['textvariable'] == str(self.rush_mode_var):
+            widget.config(state="readonly")
+        for child in widget.winfo_children():
+            self._enable_combobox_recursive(child)
+
+    def on_mode_change(self, event=None):
+        """当抢课模式改变时的回调"""
+        mode = self.rush_mode_var.get()
+        
+        if mode == "定时抢课":
+            # 启用时间输入框，修改按钮文本
+            self.rush_time_entry.config(state=tk.NORMAL)
+            self.start_auto_btn.config(text="定时抢课")
+        else:
+            # 禁用时间输入框，修改按钮文本
+            self.rush_time_entry.config(state=tk.DISABLED)
+            self.start_auto_btn.config(text="开始轮询")
+
+    def start_selection(self):
+        """统一的开始抢课入口，根据模式选择"""
+        mode = self.rush_mode_var.get()
+        
+        if mode == "定时抢课":
+            # 调用定时抢课模式
+            rush_time = self.rush_time_var.get().strip()
+            if not rush_time:
+                messagebox.showerror("错误", "请输入抢课时间")
+                return
+            self.start_timed_rush_mode(rush_time)
+        else:
+            # 调用原来的轮询模式
+            self.start_auto_selection()
+
+    def start_timed_rush_mode(self, rush_time_str):
+        """
+        定时抢课模式
+        
+        参数:
+            rush_time_str: 抢课时间字符串，格式 "HH:MM:SS" (例如: "10:00:00")
+        """
+        global selection_running, stop_selection, final_cookies_dict, course_data_list
+        
+        if selection_running:
+            messagebox.showwarning("警告", "已有抢课任务正在运行")
+            return
+        
+        if not final_cookies_dict:
+            messagebox.showerror("错误", "请先登录")
+            return
+        
+        if not course_data_list:
+            messagebox.showerror("错误", "请先添加课程")
+            return
+        
+        # 解析抢课时间
+        try:
+            from datetime import datetime, time
+            rush_hour, rush_minute, rush_second = map(int, rush_time_str.split(':'))
+            target_time = time(rush_hour, rush_minute, rush_second)
+        except Exception as e:
+            messagebox.showerror("错误", f"时间格式错误: {e}\n请使用 HH:MM:SS 格式")
+            return
+        
+        selection_running = True
+        stop_selection = False
+        
+        # 禁用相关按钮
+        self.add_course_btn.config(state=tk.DISABLED)
+        self.start_auto_btn.config(state=tk.DISABLED)
+        self.remove_course_btn.config(state=tk.DISABLED)
+        self.stop_auto_btn.config(state=tk.NORMAL)
+        if hasattr(self, 'rush_mode_var'):
+            for child in self.course_tab.winfo_children():
+                self._disable_combobox_recursive(child)
+        if hasattr(self, 'rush_time_entry'):
+            self.rush_time_entry.config(state=tk.DISABLED)
+        
+        rush_thread = threading.Thread(
+            target=self._timed_rush_worker,
+            args=(target_time,),
+            daemon=True
+        )
+        rush_thread.start()
+
+    def _timed_rush_worker(self, target_time):
+        """定时抢课工作线程"""
+        import time
+        from datetime import datetime
+        import concurrent.futures
+        global selection_running, stop_selection, final_cookies_dict, course_data_list
+        
+        try:
+            # 等待到指定时间
+            print(f"⏰ 定时抢课模式启动，目标时间：{target_time}")
+            self.root.after(0, lambda: self.status_var.set(f"等待抢课时间：{target_time}"))
+            
+            while True:
+                now = datetime.now().time()
+                
+                if stop_selection:
+                    print("🛑 用户请求停止定时抢课")
+                    return
+                
+                # 检查是否到达抢课时间（精确到秒）
+                if now.hour == target_time.hour and now.minute == target_time.minute and now.second == target_time.second:
+                    break
+                
+                # 显示倒计时
+                target_datetime = datetime.combine(datetime.today(), target_time)
+                now_datetime = datetime.now()
+                if target_datetime < now_datetime:
+                    # 如果目标时间已过，提示错误
+                    error_msg = f"抢课时间 {target_time} 已过，请重新设置"
+                    print(f"❌ {error_msg}")
+                    self.root.after(0, lambda: messagebox.showerror("错误", error_msg))
+                    return
+                
+                time_diff = (target_datetime - now_datetime).total_seconds()
+                hours = int(time_diff // 3600)
+                minutes = int((time_diff % 3600) // 60)
+                seconds = int(time_diff % 60)
+                countdown_text = f"距离抢课时间还有：{hours:02d}:{minutes:02d}:{seconds:02d}"
+                self.root.after(0, lambda ct=countdown_text: self.status_var.set(ct))
+                
+                # 每秒检查一次
+                time.sleep(1)
+            
+            print(f"🚀 抢课时间到达！开始抢课...")
+            self.root.after(0, lambda: self.status_var.set("正在抢课中..."))
+            
+            # 按优先级分组课程
+            from collections import defaultdict
+            courses_by_priority = defaultdict(list)
+            for course in course_data_list:
+                courses_by_priority[course["priority"]].append(course)
+            
+            sorted_priorities = sorted(courses_by_priority.keys())
+            
+            # 成功标志
+            success = False
+            
+            # 使用线程池进行异步请求
+            for priority in sorted_priorities:
+                if success or stop_selection:
+                    break
+                
+                courses = courses_by_priority[priority]
+                print(f"\n📌 开始抢优先级 {priority} 的课程（共 {len(courses)} 门）")
+                
+                # 对当前优先级的所有课程进行定时抢课
+                for course in courses:
+                    if success or stop_selection:
+                        break
+                    
+                    course_name = course["name"]
+                    print(f"\n🎯 正在抢课：{course_name}")
+                    
+                    # 每3.5秒发送一次请求，直到成功或满足停止条件
+                    request_count = 0
+                    while not success and not stop_selection:
+                        request_count += 1
+                        
+                        try:
+                            # 异步发送请求，不等待完整响应
+                            future = self._send_rush_request_async(course)
+                            
+                            # 等待最多3.5秒
+                            try:
+                                result = future.result(timeout=3.5)
+                                
+                                if result:
+                                    status, text = result
+                                    
+                                    # 检查响应内容
+                                    if "成功" in text or "success" in text.lower():
+                                        print(f"✅ 抢课成功！课程：{course_name}")
+                                        self.root.after(0, lambda cn=course_name: messagebox.showinfo("成功", f"抢课成功：{cn}"))
+                                        self.root.after(0, lambda: self.status_var.set("抢课成功！"))
+                                        success = True
+                                        break
+                                    
+                                    elif "已选择" in text or "already selected" in text.lower():
+                                        print(f"ℹ️ 已选择该课程：{course_name}，停止抢课")
+                                        success = True
+                                        break
+                                    
+                                    elif "已满" in text or "full" in text.lower():
+                                        print(f"🚫 课程已满：{course_name}，停止抢课")
+                                        break  # 停止抢这门课，继续下一门
+                                    
+                                    else:
+                                        print(f"[{request_count}] {course_name}: {text[:100]}")
+                            
+                            except concurrent.futures.TimeoutError:
+                                # 超时，继续下一次请求
+                                print(f"[{request_count}] {course_name}: 请求超时（3.5秒），继续...")
+                        
+                        except Exception as e:
+                            print(f"[{request_count}] 请求异常：{e}")
+                        
+                        # 等待3.5秒再发送下一次请求
+                        if not success and not stop_selection:
+                            time.sleep(3.5)
+            
+            if not success:
+                print("🔚 所有课程抢课完成")
+                self.root.after(0, lambda: self.status_var.set("抢课结束"))
+        
+        except Exception as e:
+            error_msg = f"定时抢课出错：{e}"
+            print(f"❌ {error_msg}")
+            self.root.after(0, lambda: messagebox.showerror("错误", error_msg))
+            self.root.after(0, lambda: self.status_var.set("抢课失败"))
+        
+        finally:
+            self.root.after(0, self.restore_buttons)
+            selection_running = False
+            stop_selection = False
+
+    def _send_rush_request_async(self, course):
+        """
+        异步发送抢课请求
+        返回 Future 对象
+        """
+        import concurrent.futures
+        
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(self._send_rush_request, course)
+        return future
+
+    def _send_rush_request(self, course):
+        """
+        发送单次抢课请求
+        返回: (status_code, response_text) 或 None
+        """
+        import requests
+        global final_cookies_dict
+        
+        try:
+            url = "https://byyt.ustb.edu.cn/Xsxk/addGouwuche"
+            
+            session = requests.Session()
+            session.cookies.update(final_cookies_dict)
+            session.headers.update({
+                "accept": "application/json, text/javascript, */*; q=0.01",
+                "accept-encoding": "gzip, deflate, br, zstd",
+                "accept-language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
+                "cache-control": "no-cache",
+                "connection": "keep-alive",
+                "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "host": "byyt.ustb.edu.cn",
+                "origin": "https://byyt.ustb.edu.cn",
+                "pragma": "no-cache",
+                "referer": "https://byyt.ustb.edu.cn/Xsxk/query/1",
+                "sec-ch-ua": '"Not;A=Brand";v="99", "Microsoft Edge";v="139", "Chromium";v="139"',
+                "sec-ch-ua-mobile": "?1",
+                "sec-ch-ua-platform": '"Android"',
+                "sec-fetch-dest": "empty",
+                "sec-fetch-mode": "cors",
+                "sec-fetch-site": "same-origin",
+                "user-agent": "Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Mobile Safari/537.36 Edg/139.0.0.0",
+                "x-requested-with": "XMLHttpRequest"
+            })
+            
+            # 发送请求，timeout设置为3.5秒
+            response = session.post(url, data=course["data"], timeout=3.5)
+            
+            return (response.status_code, response.text)
+        
+        except requests.Timeout:
+            # 超时异常，返回None让外层处理
+            return None
+        except Exception as e:
+            print(f"请求异常：{e}")
+            return None
 
     def auto_selection_process(self):
         global course_data_list, final_cookies_dict, selection_running, stop_selection
@@ -1204,7 +1588,7 @@ class CourseSelectionApp:
                         if course_id in failed_course_ids:
                             continue
 
-                        time.sleep(1.5)
+                        time.sleep(3.5)
                         if stop_selection:
                             break
 
@@ -1441,4 +1825,3 @@ if __name__ == "__main__":
     root = tk.Tk()
     app = CourseSelectionApp(root)
     root.mainloop()
-
