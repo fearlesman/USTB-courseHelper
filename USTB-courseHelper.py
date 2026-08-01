@@ -1,48 +1,32 @@
 import os
 import orjson
-from selenium import webdriver
 from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
 from PIL import Image, ImageTk
 from io import BytesIO
 import requests
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, time as clock_time
 import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
 import queue
 import sys
+from academic_term import get_current_academic_term
+from browser_driver import create_chrome_driver
+from course_query import (
+    DISPLAY_COLUMNS,
+    CourseSearchCriteria,
+    CourseSearchResult,
+    build_course_query_payload,
+    extract_course_search_results,
+)
+from rush_schedule import get_scheduled_start
 from selenium.webdriver.common.by import By
 from bs4 import BeautifulSoup
 from collections import defaultdict
-
-def get_chromedriver_path():
-    # 优先使用手动下载的驱动（放在项目目录的 drivers/ 下）
-    local_driver = os.path.join(os.path.dirname(__file__), "drivers", "chromedriver")
-    if os.name == 'nt':  # Windows
-        local_driver += ".exe"
-    
-    if os.path.exists(local_driver):
-        print(f"✅ 使用本地 ChromeDriver: {local_driver}")
-        return local_driver
-    
-    # 备用：尝试自动下载（可能失败）
-    try:
-        from webdriver_manager.chrome import ChromeDriverManager
-        return ChromeDriverManager().install()
-    except Exception as e:
-        raise RuntimeError(
-            "❌ 无法自动下载 ChromeDriver（网络受限）\n"
-            "👉 请手动下载并放入 drivers/ 目录：\n"
-            "   1. 访问 https://npmmirror.com/mirrors/chromedriver\n"
-            "   2. 根据 Chrome 版本下载对应驱动（如 120.0.6099.109）\n"
-            "   3. 解压 chromedriver.exe 到项目 drivers/ 文件夹"
-        ) from e
 
 # 全局变量
 qr_image_url = None
@@ -124,8 +108,6 @@ class CourseSelectionApp:
         
         # 配置浏览器
         self.configure_browser()
-        chrome_driver_path = os.path.join(os.path.dirname(__file__), "chromedriver.exe")
-        self.service = Service(chrome_driver_path)
 
          # 设置窗口关闭事件处理
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -589,17 +571,23 @@ class CourseSelectionApp:
         ttk.Label(type_frame, text="课程类型：").pack(side=tk.LEFT, padx=(0, 10))
         self.course_type_var = tk.StringVar()
         self.course_type_combo = ttk.Combobox(type_frame, textvariable=self.course_type_var, 
-                                             values=["素质扩展课", "专业扩展课", "MOOC","必修课"], state="readonly", width=15)
+                                             values=["所有", "素质扩展课", "专业扩展课", "MOOC", "必修课"], state="readonly", width=15)
         self.course_type_combo.current(0)
         self.course_type_combo.pack(side=tk.LEFT)
         
         id_frame = ttk.Frame(input_frame, style="TFrame")
         id_frame.pack(fill="x", pady=5)
         
-        ttk.Label(id_frame, text="课程ID：").pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Label(id_frame, text="课程代码：").pack(side=tk.LEFT, padx=(0, 10))
         self.course_id_var = tk.StringVar()
         ttk.Entry(id_frame, textvariable=self.course_id_var, width=20).pack(side=tk.LEFT)
-        
+
+        name_frame = ttk.Frame(input_frame, style="TFrame")
+        name_frame.pack(fill="x", pady=5)
+        ttk.Label(name_frame, text="课程名称：").pack(side=tk.LEFT, padx=(0, 10))
+        self.course_name_var = tk.StringVar()
+        ttk.Entry(name_frame, textvariable=self.course_name_var, width=30).pack(side=tk.LEFT)
+
         priority_frame = ttk.Frame(input_frame, style="TFrame")
         priority_frame.pack(fill="x", pady=5)
         
@@ -612,7 +600,9 @@ class CourseSelectionApp:
         semester_frame.pack(fill="x", pady=5)
         
         ttk.Label(semester_frame, text="学期：").pack(side=tk.LEFT, padx=(0, 10))
-        self.semester_var = tk.StringVar(value="2025-2026-2")
+        self.semester_var = tk.StringVar(
+            value=get_current_academic_term(datetime.now().date())
+        )
         ttk.Entry(semester_frame, textvariable=self.semester_var, width=20).pack(side=tk.LEFT)
         
         retry_frame = ttk.Frame(input_frame, style="TFrame")
@@ -640,31 +630,68 @@ class CourseSelectionApp:
         ttk.Label(mode_frame, text="（轮询：持续捡漏；定时：到点开抢）", 
                   style="TLabel").pack(side=tk.LEFT)
         
-        # 定时抢课时间输入框架（始终显示，但默认禁用）
-        time_frame = ttk.Frame(input_frame, style="TFrame")
-        time_frame.pack(fill="x", pady=5)
+        # 定时抢课时间输入框架（仅在定时模式显示）
+        self.rush_time_frame = ttk.Frame(input_frame, style="TFrame")
         
-        ttk.Label(time_frame, text="抢课时间：", style="TLabel").pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Label(self.rush_time_frame, text="抢课时间：", style="TLabel").pack(side=tk.LEFT, padx=(0, 10))
         
         self.rush_time_var = tk.StringVar(value="10:00:00")
-        self.rush_time_entry = ttk.Entry(time_frame, textvariable=self.rush_time_var, width=15)
+        self.rush_time_entry = ttk.Entry(self.rush_time_frame, textvariable=self.rush_time_var, width=15)
         self.rush_time_entry.pack(side=tk.LEFT, padx=(0, 10))
-        self.rush_time_entry.config(state=tk.DISABLED)  # 默认禁用
         
-        ttk.Label(time_frame, text="格式: HH:MM:SS (如 10:00:00)", 
+        ttk.Label(self.rush_time_frame, text="格式: HH:MM:SS (如 10:00:00)",
                   style="TLabel").pack(side=tk.LEFT)
         
         btn_frame = ttk.Frame(course_frame, style="TFrame")
         btn_frame.pack(pady=10)
         
-        self.add_course_btn = ttk.Button(btn_frame, text="添加课程", command=self.add_course)
+        self.add_course_btn = ttk.Button(btn_frame, text="查询课程", command=self.search_courses)
         self.add_course_btn.pack(side=tk.LEFT, padx=5)
+
+        self.add_selected_course_btn = ttk.Button(
+            btn_frame, text="添加选中课程", command=self.add_selected_courses
+        )
+        self.add_selected_course_btn.pack(side=tk.LEFT, padx=5)
 
         self.start_auto_btn = ttk.Button(btn_frame, text="开始轮询", command=self.start_selection)
         self.start_auto_btn.pack(side=tk.LEFT, padx=5)
 
         self.stop_auto_btn = ttk.Button(btn_frame, text="停止抢课", command=self.stop_auto_selection, state=tk.DISABLED)
         self.stop_auto_btn.pack(side=tk.LEFT, padx=5)
+
+        result_frame = ttk.Frame(course_frame, style="TFrame")
+        result_frame.pack(fill="x", pady=(0, 10))
+        ttk.Label(result_frame, text="课程查询结果：", style="Header.TLabel").pack(anchor="w")
+        result_columns = tuple(field_name for field_name, _ in DISPLAY_COLUMNS)
+        self.course_result_tree = ttk.Treeview(
+            result_frame,
+            columns=result_columns,
+            show="headings",
+            selectmode="extended",
+            height=6,
+        )
+        for field_name, column_title in DISPLAY_COLUMNS:
+            self.course_result_tree.heading(field_name, text=column_title)
+            self.course_result_tree.column(field_name, width=110, minwidth=80, stretch=False)
+        self.course_result_tree.column("display_name", width=160)
+        self.course_result_tree.column("course_name", width=160)
+        self.course_result_tree.column("course_category", width=240)
+        self.course_result_tree.column("schedule", width=260)
+        self.search_results_by_task_id: dict[str, CourseSearchResult] = {}
+        self.search_result_course_types_by_task_id: dict[str, str] = {}
+        result_scrollbar_y = ttk.Scrollbar(
+            result_frame, orient="vertical", command=self.course_result_tree.yview
+        )
+        result_scrollbar_x = ttk.Scrollbar(
+            result_frame, orient="horizontal", command=self.course_result_tree.xview
+        )
+        self.course_result_tree.configure(
+            yscrollcommand=result_scrollbar_y.set,
+            xscrollcommand=result_scrollbar_x.set,
+        )
+        self.course_result_tree.pack(side=tk.TOP, fill="x", expand=True)
+        result_scrollbar_y.pack(side=tk.RIGHT, fill="y")
+        result_scrollbar_x.pack(side=tk.BOTTOM, fill="x")
         
         list_frame = ttk.Frame(course_frame, style="TFrame")
         list_frame.pack(fill="both", expand=True, pady=10)
@@ -740,14 +767,10 @@ class CourseSelectionApp:
     def login_process(self):
         global driver, login_success, final_cookies_dict
         try:
-            print("🔄 正在检查并下载匹配的 ChromeDriver...")
-            self.status_var.set("正在下载/匹配 ChromeDriver...")
-
-            driver_path = get_chromedriver_path()
-            print(f"✅ 使用 ChromeDriver: {driver_path}")
-
-            service = Service(driver_path)
-            driver = webdriver.Chrome(service=service, options=self.chrome_options)
+            print("🔄 正在由 Selenium Manager 匹配 ChromeDriver...")
+            self.status_var.set("正在匹配 ChromeDriver...")
+            driver = create_chrome_driver(self.chrome_options)
+            print("✅ 已启动与当前 Chrome 匹配的 ChromeDriver")
 
             driver.get("https://byyt.ustb.edu.cn/oauth/login/code")
             print("🌐 已进入登录页面")
@@ -840,7 +863,6 @@ class CourseSelectionApp:
                     cookies = driver.get_cookies()
                     final_cookies_dict = {c['name']: c['value'] for c in cookies}
                     print(f"\n🔑 已获取 {len(final_cookies_dict)} 个 Cookie")
-                    print(final_cookies_dict)
                     login_success = True
                     self.start_online_keepalive()
                     break
@@ -850,6 +872,236 @@ class CourseSelectionApp:
                 time.sleep(2)
         stop_display = True
         
+    def search_courses(self: "CourseSelectionApp") -> None:
+        """
+        读取联合筛选条件并在后台查询可选课程。
+
+        Args:
+            self: 当前课程助手应用实例。
+
+        Returns:
+            None: 查询结果会异步写入课程查询结果表。
+        """
+        global final_cookies_dict
+        if not final_cookies_dict:
+            messagebox.showerror("错误", "请先登录")
+            return
+
+        course_type_codes = {
+            "素质扩展课": "sztzk-b-b",
+            "专业扩展课": "zytzk-b-b",
+            "MOOC": "mooc-b-b",
+            "必修课": "bx-b-b",
+        }
+        selected_course_type = self.course_type_var.get()
+        if selected_course_type not in {"所有", *course_type_codes}:
+            messagebox.showerror("错误", "课程类型无效")
+            return
+
+        criteria = CourseSearchCriteria(
+            course_code=self.course_id_var.get().strip(),
+            course_name=self.course_name_var.get().strip(),
+        )
+        try:
+            target_course_types = (
+                course_type_codes.items()
+                if selected_course_type == "所有"
+                else ((selected_course_type, course_type_codes[selected_course_type]),)
+            )
+            payloads = [
+                (
+                    course_type_code,
+                    build_course_query_payload(
+                        semester=self.semester_var.get().strip(),
+                        course_type_code=course_type_code,
+                        criteria=criteria,
+                    ),
+                )
+                for _, course_type_code in target_course_types
+            ]
+        except ValueError as error:
+            messagebox.showerror("错误", str(error))
+            return
+
+        self.add_course_btn.config(state=tk.DISABLED)
+        self.status_var.set("正在查询课程...")
+        threading.Thread(
+            target=self.query_course_results,
+            args=(payloads,),
+            daemon=True,
+        ).start()
+
+    def query_course_results(
+        self: "CourseSelectionApp", payloads: list[tuple[str, dict[str, str]]]
+    ) -> None:
+        """
+        使用当前登录会话请求课程结果并安排界面刷新。
+
+        Args:
+            self: 当前课程助手应用实例。
+            payloads: 选课方式代码与其对应的非空查询参数列表。
+
+        Returns:
+            None: 结果或错误信息通过 Tkinter 主线程展示。
+        """
+        global final_cookies_dict
+        try:
+            session = requests.Session()
+            session.cookies.update(final_cookies_dict)
+            session.headers.update({
+                "Accept": "*/*",
+                "Accept-Encoding": "gzip, deflate, br, zstd",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "Origin": "https://byyt.ustb.edu.cn",
+                "Referer": "https://byyt.ustb.edu.cn/Xsxk/query/1",
+                "RoleCode": "null",
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "same-origin",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36 Edg/150.0.0.0",
+                "X-Requested-With": "XMLHttpRequest",
+                "sec-ch-ua": '"Not;A=Brand";v="8", "Chromium";v="150", "Microsoft Edge";v="150"',
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"Windows"',
+            })
+            result_by_task_id: dict[str, CourseSearchResult] = {}
+            course_type_by_task_id: dict[str, str] = {}
+            for course_type_code, payload in payloads:
+                response = session.post(
+                    "https://byyt.ustb.edu.cn/Xsxk/queryKxrw",
+                    data=payload,
+                    timeout=30,
+                )
+                response.raise_for_status()
+                for result in extract_course_search_results(orjson.loads(response.content)):
+                    result_by_task_id.setdefault(result.task_id, result)
+                    course_type_by_task_id.setdefault(result.task_id, course_type_code)
+            results = list(result_by_task_id.values())
+            self.root.after(
+                0,
+                lambda: self.show_course_search_results(
+                    results, course_type_by_task_id
+                ),
+            )
+        except Exception as error:
+            error_message = f"查询课程时出错：{error}"
+            print(f"❌ {error_message}")
+            self.root.after(0, lambda: messagebox.showerror("错误", error_message))
+        finally:
+            self.root.after(0, lambda: self.add_course_btn.config(state=tk.NORMAL))
+
+    def show_course_search_results(
+        self: "CourseSelectionApp",
+        results: list[CourseSearchResult],
+        course_type_by_task_id: dict[str, str],
+    ) -> None:
+        """
+        清空并填充课程查询结果表。
+
+        Args:
+            self: 当前课程助手应用实例。
+            results: 已完成空值清理和字段映射的查询结果。
+            course_type_by_task_id: 每条结果对应的选课方式代码。
+
+        Returns:
+            None: 结果直接渲染到 Treeview 控件。
+        """
+        for item_id in self.course_result_tree.get_children():
+            self.course_result_tree.delete(item_id)
+        self.search_results_by_task_id = {
+            result.task_id: result for result in results
+        }
+        self.search_result_course_types_by_task_id = course_type_by_task_id
+        for result in results:
+            self.course_result_tree.insert(
+                "", "end", iid=result.task_id, values=result.display_values()
+            )
+
+        if results:
+            self.status_var.set(f"查询到 {len(results)} 门课程，请选择后添加")
+        else:
+            self.status_var.set("未找到符合条件的课程")
+            messagebox.showinfo("查询结果", "未找到符合条件的课程")
+
+    def add_selected_courses(self: "CourseSelectionApp") -> None:
+        """
+        将查询结果表中选中的课程加入当前抢课列表。
+
+        Args:
+            self: 当前课程助手应用实例。
+
+        Returns:
+            None: 选中课程会保存到当前人员的课程列表并刷新界面。
+        """
+        global course_data_list, course_id_count
+        selected_task_ids = self.course_result_tree.selection()
+        if not selected_task_ids:
+            messagebox.showwarning("警告", "请先选择要添加的课程")
+            return
+
+        try:
+            priority = int(self.priority_var.get().strip())
+        except ValueError:
+            messagebox.showerror("错误", "优先级必须是整数")
+            return
+
+        semester = self.semester_var.get().strip()
+        semester_parts = semester.split("-")
+        if len(semester_parts) != 3 or not all(semester_parts):
+            messagebox.showerror("错误", "学期格式错误，请使用 YYYY-YYYY-N 格式")
+            return
+
+        academic_year = "-".join(semester_parts[:2])
+        term = semester_parts[2]
+        added_count = 0
+        for task_id in selected_task_ids:
+            result = self.search_results_by_task_id.get(task_id)
+            course_type_code = self.search_result_course_types_by_task_id.get(task_id)
+            if (
+                result is None
+                or result.category_code == "—"
+                or course_type_code is None
+            ):
+                continue
+            course_id_count += 1
+            course_data_list.append({
+                "priority": priority,
+                "data": {
+                    "p_xktjz": "rwtjzyx",
+                    "p_xn": academic_year,
+                    "p_xq": term,
+                    "p_xkfsdm": course_type_code,
+                    "p_kclb": result.category_code,
+                    "p_id": result.task_id,
+                },
+                "name": result.course_name,
+                "teacher": result.teacher,
+                "course_id": result.course_code,
+                "schedule": result.schedule,
+                "id": course_id_count,
+            })
+            self.cache_course_info(
+                result.course_code,
+                f"{academic_year}{term}",
+                {
+                    "name": result.course_name,
+                    "teacher": result.teacher,
+                    "p_id": result.task_id,
+                    "p_kclb": result.category_code,
+                    "schedule": result.schedule,
+                },
+            )
+            added_count += 1
+
+        if not added_count:
+            messagebox.showerror("错误", "选中课程缺少课程类别编码，无法添加")
+            return
+        self.save_course_list()
+        self.update_course_list()
+        self.status_var.set(f"已添加 {added_count} 门课程")
+        messagebox.showinfo("成功", f"已添加 {added_count} 门课程")
+
     def add_course(self):
         global final_cookies_dict, course_data_list
         
@@ -1234,9 +1486,10 @@ class CourseSelectionApp:
         # 恢复时间输入（根据当前模式）
         if hasattr(self, 'rush_time_entry'):
             if self.rush_mode_var.get() == "定时抢课":
+                self.rush_time_frame.pack(fill="x", pady=5)
                 self.rush_time_entry.config(state=tk.NORMAL)
             else:
-                self.rush_time_entry.config(state=tk.DISABLED)
+                self.rush_time_frame.pack_forget()
         
         self.student_switch_lock = False # 解锁人员切换
         self.status_var.set("抢课结束，按钮已恢复")
@@ -1255,21 +1508,39 @@ class CourseSelectionApp:
         for child in widget.winfo_children():
             self._enable_combobox_recursive(child)
 
-    def on_mode_change(self, event=None):
-        """当抢课模式改变时的回调"""
+    def on_mode_change(
+        self: "CourseSelectionApp", event: object | None = None
+    ) -> None:
+        """
+        根据抢课模式切换抢课时间输入框的可见性。
+
+        Args:
+            self: 当前课程助手应用实例。
+            event: Tkinter 模式切换事件；直接调用时为 None。
+
+        Returns:
+            None: 直接更新界面控件状态。
+        """
         mode = self.rush_mode_var.get()
         
         if mode == "定时抢课":
-            # 启用时间输入框，修改按钮文本
+            self.rush_time_frame.pack(fill="x", pady=5)
             self.rush_time_entry.config(state=tk.NORMAL)
             self.start_auto_btn.config(text="定时抢课")
         else:
-            # 禁用时间输入框，修改按钮文本
-            self.rush_time_entry.config(state=tk.DISABLED)
+            self.rush_time_frame.pack_forget()
             self.start_auto_btn.config(text="开始轮询")
 
-    def start_selection(self):
-        """统一的开始抢课入口，根据模式选择"""
+    def start_selection(self: "CourseSelectionApp") -> None:
+        """
+        根据当前模式立即开始轮询或等待后开始轮询。
+
+        Args:
+            self: 当前课程助手应用实例。
+
+        Returns:
+            None: 在校验成功后启动相应的后台线程。
+        """
         mode = self.rush_mode_var.get()
         
         if mode == "定时抢课":
@@ -1283,12 +1554,18 @@ class CourseSelectionApp:
             # 调用原来的轮询模式
             self.start_auto_selection()
 
-    def start_timed_rush_mode(self, rush_time_str):
+    def start_timed_rush_mode(
+        self: "CourseSelectionApp", rush_time_str: str
+    ) -> None:
         """
-        定时抢课模式
-        
-        参数:
-            rush_time_str: 抢课时间字符串，格式 "HH:MM:SS" (例如: "10:00:00")
+        启动定时等待线程，并在目标时刻转入轮询抢课。
+
+        Args:
+            self: 当前课程助手应用实例。
+            rush_time_str: 抢课时间字符串，格式为 `HH:MM:SS`。
+
+        Returns:
+            None: 校验成功后启动后台等待线程。
         """
         global selection_running, stop_selection, final_cookies_dict, course_data_list
         
@@ -1306,9 +1583,8 @@ class CourseSelectionApp:
         
         # 解析抢课时间
         try:
-            from datetime import datetime, time
             rush_hour, rush_minute, rush_second = map(int, rush_time_str.split(':'))
-            target_time = time(rush_hour, rush_minute, rush_second)
+            target_time = clock_time(rush_hour, rush_minute, rush_second)
         except Exception as e:
             messagebox.showerror("错误", f"时间格式错误: {e}\n请使用 HH:MM:SS 格式")
             return
@@ -1328,11 +1604,61 @@ class CourseSelectionApp:
             self.rush_time_entry.config(state=tk.DISABLED)
         
         rush_thread = threading.Thread(
-            target=self._timed_rush_worker,
+            target=self._timed_polling_worker,
             args=(target_time,),
             daemon=True
         )
         rush_thread.start()
+
+    def _timed_polling_worker(
+        self: "CourseSelectionApp", target_time: clock_time
+    ) -> None:
+        """
+        等待到目标时刻后复用轮询抢课流程。
+
+        Args:
+            self: 当前课程助手应用实例。
+            target_time: 用户设定的每日开始轮询时刻。
+
+        Returns:
+            None: 等待取消时恢复界面；开始轮询后由轮询流程负责收尾。
+        """
+        global selection_running, stop_selection
+        polling_process_started = False
+        try:
+            now = datetime.now()
+            scheduled_start = get_scheduled_start(now, target_time)
+            if scheduled_start > now:
+                print(f"⏰ 定时抢课已启动，轮询将在 {scheduled_start:%H:%M:%S} 开始")
+                while not stop_selection:
+                    remaining_seconds = (scheduled_start - datetime.now()).total_seconds()
+                    if remaining_seconds <= 0:
+                        break
+                    hours, remainder = divmod(int(remaining_seconds), 3600)
+                    minutes, seconds = divmod(remainder, 60)
+                    countdown_text = f"距离开始轮询还有：{hours:02d}:{minutes:02d}:{seconds:02d}"
+                    self.root.after(
+                        0, lambda text=countdown_text: self.status_var.set(text)
+                    )
+                    time.sleep(min(1.0, remaining_seconds))
+
+            if stop_selection:
+                print("🛑 用户取消定时抢课")
+                return
+
+            print("🚀 定时时间已到，开始轮询抢课")
+            self.root.after(0, lambda: self.status_var.set("正在轮询抢课..."))
+            polling_process_started = True
+            self.auto_selection_process()
+        except Exception as error:
+            error_message = f"定时抢课出错：{error}"
+            print(f"❌ {error_message}")
+            self.root.after(0, lambda: messagebox.showerror("错误", error_message))
+        finally:
+            if not polling_process_started:
+                self.root.after(0, self.restore_buttons)
+                selection_running = False
+                stop_selection = False
 
     def _timed_rush_worker(self, target_time):
         """定时抢课工作线程"""
