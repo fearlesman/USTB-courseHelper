@@ -308,10 +308,16 @@ def test_all_course_types_continue_after_failure_and_aggregate_results(
     app.apply_active_user_control_state = lambda: None
     logs: list[str] = []
     app.user_log = lambda target_id, message: logs.append(message)
-    shown: list[tuple[list[object], dict[str, str], int]] = []
+    shown: list[tuple[list[object], dict[str, str], int, dict[str, int]]] = []
     app.show_course_search_results = (
-        lambda target_id, results, type_by_task_id, failed_count=0: shown.append(
-            (list(results), dict(type_by_task_id), failed_count)
+        lambda target_id, results, type_by_task_id, failed_count=0,
+        type_counts=None: shown.append(
+            (
+                list(results),
+                dict(type_by_task_id),
+                failed_count,
+                dict(type_counts or {}),
+            )
         )
     )
     errors: list[str] = []
@@ -339,8 +345,363 @@ def test_all_course_types_continue_after_failure_and_aggregate_results(
         "[[MOOC_TASK]]": "mooc-b-b",
     }
     assert shown[0][2] == 1
+    assert shown[0][3] == {
+        "sztzk-b-b": 0,
+        "zytzk-b-b": 1,
+        "mooc-b-b": 1,
+        "bx-b-b": 1,
+    }
     assert any("sztzk-b-b" in message for message in logs)
     assert errors == []
+
+
+def test_course_type_query_fetches_later_pages(
+    app_module: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """验证单个课程类型会继续获取超过首批数量的结果。
+
+    Args:
+        app_module: 已加载的课程助手入口模块。
+        tmp_path: pytest 临时目录。
+        monkeypatch: pytest 提供的运行时替换工具。
+
+    Returns:
+        None: 通过断言验证第二页课程被纳入最终汇总。
+    """
+    class FakeResponse:
+        """提供分页课程响应的最小替身。"""
+
+        def __init__(self, content: bytes) -> None:
+            """保存响应内容。
+
+            Args:
+                content: 模拟 JSON 响应字节。
+
+            Returns:
+                None: 内容保存在实例属性中。
+            """
+            self.content = content
+
+        def raise_for_status(self) -> None:
+            """模拟成功的状态检查。
+
+            Args:
+                None.
+
+            Returns:
+                None: 测试响应始终成功。
+            """
+            return None
+
+    requested_pages: list[str] = []
+    first_page = [
+        {
+            "id": f"[[TASK_{index}]]",
+            "kclb": "[[CATEGORY]]",
+            "kcdm": f"[[CODE_{index}]]",
+            "kcmc": f"[[COURSE_{index}]]",
+        }
+        for index in range(100)
+    ]
+    second_page = [
+        {
+            "id": "[[TARGET_TASK]]",
+            "kclb": "[[CATEGORY]]",
+            "kcdm": "[[TARGET_CODE]]",
+            "kcmc": "[[TARGET_COURSE]]",
+        }
+    ]
+
+    class FakeSession:
+        """根据页码返回不同课程数据的会话替身。"""
+
+        def __init__(self) -> None:
+            """初始化 Cookie 和请求头容器。
+
+            Args:
+                None.
+
+            Returns:
+                None: 空容器保存在实例属性中。
+            """
+            self.cookies: dict[str, str] = {}
+            self.headers: dict[str, str] = {}
+
+        def post(
+            self,
+            url: str,
+            data: dict[str, str],
+            timeout: int,
+        ) -> FakeResponse:
+            """返回请求页码对应的课程响应。
+
+            Args:
+                url: 被忽略的课程查询地址。
+                data: 包含页码的请求负载。
+                timeout: 被忽略的超时秒数。
+
+            Returns:
+                当前页的模拟响应。
+            """
+            page_number = data["pageNum"]
+            requested_pages.append(page_number)
+            courses = first_page if page_number == "1" else second_page
+            return FakeResponse(
+                app_module.orjson.dumps({"kxrwList": {"list": courses}})
+            )
+
+    app, profile_id, _ = _make_app(app_module, tmp_path)
+    app.apply_active_user_control_state = lambda: None
+    app.user_log = lambda *args: None
+    shown: list[list[object]] = []
+    app.show_course_search_results = (
+        lambda target_id, results, type_by_task_id, failed_count=0,
+        type_counts=None: shown.append(list(results))
+    )
+    monkeypatch.setattr(app_module.requests, "Session", FakeSession)
+
+    app.query_course_results(
+        profile_id,
+        {"SESSION": "[[COOKIE_A]]"},
+        [
+            (
+                "zytzk-b-b",
+                {
+                    "p_xkfsdm": "zytzk-b-b",
+                    "pageNum": "1",
+                    "pageSize": "100",
+                },
+            )
+        ],
+    )
+
+    assert requested_pages == ["1", "2"]
+    assert len(shown[0]) == 101
+    assert shown[0][-1].task_id == "[[TARGET_TASK]]"
+
+
+@pytest.mark.parametrize(
+    ("response_text", "expected_status"),
+    [
+        ("[[SUCCESS_RESPONSE]] 选课成功", "选课成功"),
+        (
+            '{"gjhczztm":"XKGL.OPERATE.RESULT_XKSJCTDQRWHCTRWH",'
+            '"message":"上课时间冲突，当前课程：[[COURSE_NAME]]，'
+            '冲突课程：[[CONFLICT_COURSE]]","detail":"'
+            + "X" * 180
+            + '"}',
+            "不符合选课要求",
+        ),
+    ],
+)
+def test_selection_worker_records_course_response_in_runtime(
+    app_module: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    response_text: str,
+    expected_status: str,
+) -> None:
+    """验证抢课请求状态和返回信息实时写回目标课程。
+
+    Args:
+        app_module: 已加载的课程助手入口模块。
+        tmp_path: pytest 临时目录。
+        monkeypatch: pytest 提供的运行时替换工具。
+        response_text: 模拟接口返回的完整原始文本。
+        expected_status: 期望写入目标课程的业务状态。
+
+    Returns:
+        None: 通过断言验证业务状态、完整响应和请求次数。
+    """
+    class FakeStopEvent:
+        """提供不等待的停止事件替身。"""
+
+        def __init__(self) -> None:
+            """初始化未停止状态。
+
+            Args:
+                None.
+
+            Returns:
+                None: 初始状态保存在实例属性中。
+            """
+            self.stopped = False
+
+        def wait(self, timeout: float | None = None) -> bool:
+            """跳过真实等待并返回停止状态。
+
+            Args:
+                timeout: 被忽略的等待秒数。
+
+            Returns:
+                当前是否已停止。
+            """
+            return self.stopped
+
+        def is_set(self) -> bool:
+            """返回当前停止状态。
+
+            Args:
+                None.
+
+            Returns:
+                当前是否已停止。
+            """
+            return self.stopped
+
+        def set(self) -> None:
+            """设置停止状态。
+
+            Args:
+                None.
+
+            Returns:
+                None: 后续状态检查返回 True。
+            """
+            self.stopped = True
+
+    class FakeResponse:
+        """提供一次抢课接口响应。"""
+
+        status_code = 200
+
+        def __init__(self) -> None:
+            """保存本次参数化用例的响应文本。
+
+            Args:
+                None.
+
+            Returns:
+                None: 响应文本保存在实例属性中。
+            """
+            self.text = response_text
+
+    class FakeSession:
+        """提供抢课请求的会话替身。"""
+
+        def __init__(self) -> None:
+            """初始化 Cookie 和请求头容器。
+
+            Args:
+                None.
+
+            Returns:
+                None: 空容器保存在实例属性中。
+            """
+            self.cookies: dict[str, str] = {}
+            self.headers: dict[str, str] = {}
+
+        def post(
+            self,
+            url: str,
+            data: dict[str, object],
+            timeout: int,
+        ) -> FakeResponse:
+            """返回参数化的抢课响应。
+
+            Args:
+                url: 被忽略的抢课地址。
+                data: 被忽略的课程请求参数。
+                timeout: 被忽略的超时秒数。
+
+            Returns:
+                抢课响应替身。
+            """
+            return FakeResponse()
+
+    app, profile_id, _ = _make_app(app_module, tmp_path)
+    app.finish_user_task_ui = lambda target_id: None
+    app.runtime.mark_task_started(profile_id, waiting=False)
+    monkeypatch.setattr(app_module.requests, "Session", FakeSession)
+    monkeypatch.setattr(app_module.messagebox, "showinfo", lambda *args: None)
+    course = {
+        "id": 1,
+        "priority": 1,
+        "name": "[[COURSE_NAME]]",
+        "teacher": "[[TEACHER_NAME]]",
+        "data": {"p_id": "[[COURSE_TASK_ID]]"},
+    }
+
+    app._run_user_selection(
+        profile_id,
+        {"SESSION": "[[COOKIE_A]]"},
+        [course],
+        FakeStopEvent(),
+        True,
+        True,
+    )
+
+    state = app.runtime.course_attempt(profile_id, "[[COURSE_TASK_ID]]")
+    assert state.status == expected_status
+    assert state.attempt_count == 1
+    assert "HTTP 200" in state.message
+    assert response_text in state.message
+
+
+@pytest.mark.parametrize(
+    ("response_text", "expected_status"),
+    [
+        ("不在设定的选课时间范围内", "不在设定的选课时间范围内"),
+        ("选课成功", "选课成功"),
+        ("课程容量已满", "课程容量已满"),
+        ("不符合选课要求", "不符合选课要求"),
+        (
+            '{"success":false,"message":"课程容量已满"}',
+            "课程容量已满",
+        ),
+        (
+            '{"gjhczztm":"XKGL.OPERATE.RESULT_YCGDWRL",'
+            '"message":"[[UNRECOGNIZED_MESSAGE]]","jg":"-1"}',
+            "课程容量已满",
+        ),
+        (
+            '{"gjhczztm":"XKGL.OPERATE.RESULT_YCGZRL",'
+            '"message":"[[UNRECOGNIZED_MESSAGE]]","jg":"-1"}',
+            "课程容量已满",
+        ),
+        (
+            '{"gjhczztm":"XKGL.OPERATE.RESULT_XKSJCTDQRWHCTRWH",'
+            '"message":"[[UNRECOGNIZED_MESSAGE]]","jg":"-1"}',
+            "不符合选课要求",
+        ),
+        (
+            '{"gjhczztm":"[[UNKNOWN_RESULT_CODE]]",'
+            '"message":"对外容量已满，选课失败，课程：[[COURSE_NAME]]",'
+            '"jg":"-1"}',
+            "课程容量已满",
+        ),
+        (
+            '{"message":"总容量已满，选课失败，课程：[[COURSE_NAME]]",'
+            '"jg":"-1"}',
+            "课程容量已满",
+        ),
+        (
+            '{"message":"上课时间冲突，当前课程：[[COURSE_NAME]]，'
+            '冲突课程：[[CONFLICT_COURSE]]","jg":"-1"}',
+            "不符合选课要求",
+        ),
+    ],
+)
+def test_selection_response_uses_four_business_statuses(
+    app_module: ModuleType,
+    response_text: str,
+    expected_status: str,
+) -> None:
+    """验证抢课接口的四种业务返回映射为固定中文状态。
+
+    Args:
+        app_module: 已加载的课程助手入口模块。
+        response_text: 模拟接口返回文本。
+        expected_status: 期望显示在任务表中的状态。
+
+    Returns:
+        None: 通过断言验证状态分类结果。
+    """
+    status = app_module.classify_selection_response(response_text)
+
+    assert status == expected_status
 
 
 def test_switch_user_persists_and_loads_runtime_settings(

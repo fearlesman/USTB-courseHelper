@@ -457,9 +457,21 @@ def test_tk_workspace_builds_progressive_account_controls_and_two_pages(
         assert not hasattr(app, "quick_login_copy")
         assert app.course_result_tree.winfo_manager() == "grid"
         assert app.course_tree.winfo_manager() == "grid"
-        assert app.task_empty_label.winfo_manager() == "place"
+        assert app.course_tree["columns"] == (
+            "id",
+            "priority",
+            "name",
+            "teacher",
+            "course_id",
+            "schedule",
+            "attempt_status",
+            "last_response",
+        )
+        expected_empty_manager = "" if app.current_courses() else "place"
+        assert app.task_empty_label.winfo_manager() == expected_empty_manager
         assert not hasattr(app, "console_output")
-        assert app.current_list_name_var.get() == "未命名列表"
+        assert app.current_list_name_var.get() == "默认列表"
+        assert app.current_list_dirty_var.get() == "自动保存"
         assert app.save_rush_list_btn.winfo_exists()
         assert app.manage_rush_lists_btn.winfo_exists()
         assert app.search_priority_help_label.cget("text") == (
@@ -628,6 +640,33 @@ def test_course_changes_mark_named_list_dirty(app_module: ModuleType) -> None:
 
     assert app.current_list_name_var.get() == "[[LIST_NAME]]"
     assert app.current_list_dirty_var.get() == "有未保存更改"
+
+
+def test_default_list_is_presented_as_automatically_saved(
+    app_module: ModuleType,
+) -> None:
+    """验证未加载命名列表时使用无需手动保存的默认列表。
+
+    Args:
+        app_module: 已加载的课程助手入口模块。
+
+    Returns:
+        None: 通过断言验证默认列表名称、说明和保存状态。
+    """
+    app = app_module.CourseSelectionApp.__new__(app_module.CourseSelectionApp)
+    app.current_saved_list_id = None
+    app.current_saved_list_name = ""
+    app.current_saved_list_note = ""
+    app.current_saved_list_dirty = True
+    app.current_list_name_var = FakeVariable()
+    app.current_list_note_var = FakeVariable()
+    app.current_list_dirty_var = FakeVariable()
+
+    app.refresh_current_list_status()
+
+    assert app.current_list_name_var.get() == "默认列表"
+    assert app.current_list_note_var.get() == "自动保存当前待抢课程"
+    assert app.current_list_dirty_var.get() == "自动保存"
 
 
 def test_student_switch_resets_named_list_state(
@@ -846,7 +885,8 @@ def test_deleting_current_named_list_keeps_courses_and_resets_state(
     assert deleted == [saved.id]
     assert app.current_saved_list_id is None
     assert app.current_saved_list_dirty is True
-    assert app.current_list_name_var.get() == "未命名列表"
+    assert app.current_list_name_var.get() == "默认列表"
+    assert app.current_list_dirty_var.get() == "自动保存"
 
 
 def test_empty_profile_state_prefers_direct_login_page(

@@ -53,6 +53,52 @@ selection_running = False  # 是否正在抢课
 stop_selection = False     # 是否请求停止
 online_thread_running = False  # 是否正在运行online线程gio
 
+SELECTION_RESULT_CODE_STATUSES: dict[str, str] = {
+    "XKGL.OPERATE.RESULT_YCGDWRL": "课程容量已满",
+    "XKGL.OPERATE.RESULT_YCGZRL": "课程容量已满",
+    "XKGL.OPERATE.RESULT_XKSJCTDQRWHCTRWH": "不符合选课要求",
+}
+SELECTION_MESSAGE_STATUSES: tuple[tuple[str, str], ...] = (
+    ("不在设定的选课时间范围内", "不在设定的选课时间范围内"),
+    ("选课成功", "选课成功"),
+    ("课程容量已满", "课程容量已满"),
+    ("不符合选课要求", "不符合选课要求"),
+    ("对外容量已满", "课程容量已满"),
+    ("总容量已满", "课程容量已满"),
+    ("容量已满", "课程容量已满"),
+    ("上课时间冲突", "不符合选课要求"),
+)
+
+
+def classify_selection_response(response_text: str) -> str:
+    """按结果码和消息文本归一抢课接口的业务状态。
+
+    Args:
+        response_text: 抢课接口返回的原始文本。
+
+    Returns:
+        四种已知业务状态之一；无法识别时返回“未知响应”。
+    """
+    normalized = response_text.strip()
+    message_text = normalized
+    try:
+        parsed_response: object = orjson.loads(normalized)
+    except orjson.JSONDecodeError:
+        parsed_response = None
+    if isinstance(parsed_response, dict):
+        result_code = parsed_response.get("gjhczztm")
+        if isinstance(result_code, str):
+            mapped_status = SELECTION_RESULT_CODE_STATUSES.get(result_code.strip())
+            if mapped_status is not None:
+                return mapped_status
+        response_message = parsed_response.get("message")
+        if isinstance(response_message, str):
+            message_text = response_message.strip()
+    for message_fragment, business_status in SELECTION_MESSAGE_STATUSES:
+        if message_fragment in message_text:
+            return business_status
+    return "未知响应"
+
 # 将 print 输出按日写入 logs，同时保留源码运行时的终端回显。
 if not isinstance(sys.stdout, DailyLogWriter):
     sys.stdout = DailyLogWriter(os.path.dirname(__file__), terminal=sys.stdout)
@@ -2155,11 +2201,17 @@ class CourseSelectionApp:
         result_toolbar.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
         result_toolbar.columnconfigure(0, weight=1)
         self.search_count_var = tk.StringVar(value="尚未查询")
+        self.search_type_summary_var = tk.StringVar(value="")
         ttk.Label(
             result_toolbar,
             textvariable=self.search_count_var,
             style="SurfaceMuted.TLabel",
         ).grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            result_toolbar,
+            textvariable=self.search_type_summary_var,
+            style="SurfaceMuted.TLabel",
+        ).grid(row=1, column=0, sticky="w", pady=(5, 0))
         ttk.Label(result_toolbar, text="优先级").grid(
             row=0, column=1, padx=(12, 6)
         )
@@ -2263,9 +2315,9 @@ class CourseSelectionApp:
         ttk.Label(current_list_bar, text="当前列表", style="SurfaceMuted.TLabel").grid(
             row=0, column=0, sticky="w", padx=(0, 12)
         )
-        self.current_list_name_var = tk.StringVar(value="未命名列表")
-        self.current_list_note_var = tk.StringVar(value="暂无备注")
-        self.current_list_dirty_var = tk.StringVar(value="未保存")
+        self.current_list_name_var = tk.StringVar(value="默认列表")
+        self.current_list_note_var = tk.StringVar(value="自动保存当前待抢课程")
+        self.current_list_dirty_var = tk.StringVar(value="自动保存")
         self.current_list_name_label = ttk.Label(
             current_list_bar,
             textvariable=self.current_list_name_var,
@@ -2421,7 +2473,16 @@ class CourseSelectionApp:
         table_body.grid(row=1, column=0, columnspan=2, sticky="nsew")
         table_body.columnconfigure(0, weight=1)
         table_body.rowconfigure(0, weight=1)
-        columns = ("id", "priority", "name", "teacher", "course_id", "schedule")
+        columns = (
+            "id",
+            "priority",
+            "name",
+            "teacher",
+            "course_id",
+            "schedule",
+            "attempt_status",
+            "last_response",
+        )
         self.course_tree = ttk.Treeview(
             table_body,
             columns=columns,
@@ -2435,6 +2496,8 @@ class CourseSelectionApp:
             "teacher": "授课教师",
             "course_id": "课程代码",
             "schedule": "上课安排",
+            "attempt_status": "抢课状态",
+            "last_response": "最近返回",
         }
         widths = {
             "id": 60,
@@ -2442,7 +2505,9 @@ class CourseSelectionApp:
             "name": 220,
             "teacher": 120,
             "course_id": 130,
-            "schedule": 360,
+            "schedule": 280,
+            "attempt_status": 180,
+            "last_response": 320,
         }
         for column_name in columns:
             self.course_tree.heading(column_name, text=headings[column_name])
@@ -2450,7 +2515,7 @@ class CourseSelectionApp:
                 column_name,
                 width=widths[column_name],
                 minwidth=55,
-                stretch=column_name == "schedule",
+                stretch=column_name == "last_response",
             )
         task_scrollbar_y = ttk.Scrollbar(
             table_body,
@@ -2512,20 +2577,23 @@ class CourseSelectionApp:
         Returns:
             None: 状态条变量和样式会同步更新。
         """
-        display_name = self.current_saved_list_name or "未命名列表"
-        normalized_note = " ".join(self.current_saved_list_note.split())
-        note_summary = normalized_note or "暂无备注"
-        if len(note_summary) > 70:
-            note_summary = f"{note_summary[:67]}..."
-        if self.current_saved_list_dirty:
-            dirty_text = "有未保存更改"
-            dirty_style = "Dirty.TLabel"
-        elif self.current_saved_list_id:
-            dirty_text = "已保存"
+        if self.current_saved_list_id is None:
+            display_name = "默认列表"
+            note_summary = "自动保存当前待抢课程"
+            dirty_text = "自动保存"
             dirty_style = "Clean.TLabel"
         else:
-            dirty_text = "未保存"
-            dirty_style = "Dirty.TLabel"
+            display_name = self.current_saved_list_name
+            normalized_note = " ".join(self.current_saved_list_note.split())
+            note_summary = normalized_note or "暂无备注"
+            if len(note_summary) > 70:
+                note_summary = f"{note_summary[:67]}..."
+            if self.current_saved_list_dirty:
+                dirty_text = "有未保存更改"
+                dirty_style = "Dirty.TLabel"
+            else:
+                dirty_text = "已保存"
+                dirty_style = "Clean.TLabel"
         self.current_list_name_var.set(display_name)
         self.current_list_note_var.set(note_summary)
         self.current_list_dirty_var.set(dirty_text)
@@ -3687,28 +3755,54 @@ class CourseSelectionApp:
             course_type_by_task_id: dict[str, str] = {}
             failed_type_codes: list[str] = []
             successful_type_count = 0
+            course_type_counts = {
+                course_type_code: 0 for course_type_code, _ in payloads
+            }
             for course_type_code, payload in payloads:
-                try:
-                    response = session.post(
-                        "https://byyt.ustb.edu.cn/Xsxk/queryKxrw",
-                        data=payload,
-                        timeout=30,
-                    )
-                    response.raise_for_status()
-                    response_results = extract_course_search_results(
-                        orjson.loads(response.content)
-                    )
-                except Exception as error:
-                    failed_type_codes.append(course_type_code)
-                    self.user_log(
-                        profile_id,
-                        f"课程类型 {course_type_code} 查询失败：{error}",
-                    )
-                    continue
-                successful_type_count += 1
-                for result in response_results:
-                    result_by_task_id.setdefault(result.task_id, result)
-                    course_type_by_task_id.setdefault(result.task_id, course_type_code)
+                page_size = max(int(payload.get("pageSize", "100")), 1)
+                page_number = 1
+                type_task_ids: set[str] = set()
+                type_had_success = False
+                while page_number <= 100:
+                    page_payload = dict(payload)
+                    page_payload["pageNum"] = str(page_number)
+                    page_payload["pageSize"] = str(page_size)
+                    try:
+                        response = session.post(
+                            "https://byyt.ustb.edu.cn/Xsxk/queryKxrw",
+                            data=page_payload,
+                            timeout=30,
+                        )
+                        response.raise_for_status()
+                        response_results = extract_course_search_results(
+                            orjson.loads(response.content)
+                        )
+                    except Exception as error:
+                        failed_type_codes.append(course_type_code)
+                        self.user_log(
+                            profile_id,
+                            f"课程类型 {course_type_code} 第 {page_number} 页查询失败：{error}",
+                        )
+                        break
+                    type_had_success = True
+                    new_task_count = 0
+                    for result in response_results:
+                        if result.task_id not in type_task_ids:
+                            type_task_ids.add(result.task_id)
+                            new_task_count += 1
+                        result_by_task_id.setdefault(result.task_id, result)
+                        course_type_by_task_id.setdefault(
+                            result.task_id, course_type_code
+                        )
+                    if (
+                        len(response_results) < page_size
+                        or new_task_count == 0
+                    ):
+                        break
+                    page_number += 1
+                if type_had_success:
+                    successful_type_count += 1
+                course_type_counts[course_type_code] = len(type_task_ids)
             if successful_type_count == 0:
                 failed_summary = "、".join(failed_type_codes)
                 raise RuntimeError(f"所有课程类型查询均失败：{failed_summary}")
@@ -3720,6 +3814,7 @@ class CourseSelectionApp:
                     results,
                     course_type_by_task_id,
                     len(failed_type_codes),
+                    course_type_counts,
                 ),
             )
         except Exception as error:
@@ -3735,6 +3830,7 @@ class CourseSelectionApp:
         results: list[CourseSearchResult],
         course_type_by_task_id: dict[str, str],
         failed_type_count: int = 0,
+        course_type_counts: dict[str, int] | None = None,
     ) -> None:
         """
         清空并填充课程查询结果表。
@@ -3745,6 +3841,7 @@ class CourseSelectionApp:
             results: 已完成空值清理和字段映射的查询结果。
             course_type_by_task_id: 每条结果对应的选课方式代码。
             failed_type_count: 本次汇总中请求失败的课程类型数量。
+            course_type_counts: 每种选课方式在去重前返回的课程数量。
 
         Returns:
             None: 结果直接渲染到 Treeview 控件。
@@ -3768,6 +3865,20 @@ class CourseSelectionApp:
         self.render_course_search_results(
             results, notify_empty=failed_type_count == 0
         )
+        if course_type_counts is not None and hasattr(
+            self, "search_type_summary_var"
+        ):
+            type_labels = {
+                "sztzk-b-b": "素质扩展课",
+                "zytzk-b-b": "专业扩展课",
+                "mooc-b-b": "MOOC",
+                "bx-b-b": "必修课",
+            }
+            summary_parts = [
+                f"{type_labels.get(code, code)} {count}"
+                for code, count in course_type_counts.items()
+            ]
+            self.search_type_summary_var.set(" / ".join(summary_parts))
         if failed_type_count:
             self.search_count_var.set(
                 f"共汇总 {len(results)} 门课程（{failed_type_count} 个类型查询失败）"
@@ -4173,13 +4284,32 @@ class CourseSelectionApp:
 
         # ✅ 4. 刷新表格
         for course in courses:
+            attempt_status = "等待抢课"
+            last_response = "尚未开始"
+            raw_data = course.get("data")
+            task_id = (
+                str(raw_data.get("p_id", ""))
+                if isinstance(raw_data, dict)
+                else ""
+            )
+            if context is not None and task_id:
+                attempt = self.runtime.course_attempt(context.profile.id, task_id)
+                if attempt is not None:
+                    attempt_status = attempt.status
+                    last_response = attempt.message
+                    if attempt.attempt_count:
+                        last_response = (
+                            f"第 {attempt.attempt_count} 次 | {last_response}"
+                        )
             self.course_tree.insert("", "end", values=(
                 course["id"],
                 course["priority"],
                 course["name"],
                 course["teacher"],
                 course["course_id"],
-                course["schedule"]
+                course["schedule"],
+                attempt_status,
+                last_response,
             ))
 
         if hasattr(self, "task_count_var"):
@@ -4191,6 +4321,57 @@ class CourseSelectionApp:
             else:
                 self.task_empty_label.place(relx=0.5, rely=0.42, anchor="center")
                 self.task_empty_add_btn.place(relx=0.5, rely=0.60, anchor="center")
+
+    def record_course_attempt(
+        self: "CourseSelectionApp",
+        profile_id: str,
+        task_id: str,
+        status: str,
+        message: str,
+        attempt_count: int,
+    ) -> None:
+        """记录单门课程的抢课状态并安排可见任务表刷新。
+
+        Args:
+            self: 当前课程助手应用实例。
+            profile_id: 任务所属用户 UUID。
+            task_id: 课程任务 ID。
+            status: 当前业务状态或请求状态。
+            message: 接口返回或异常摘要。
+            attempt_count: 本轮任务中该课程已经尝试的次数。
+
+        Returns:
+            None: 状态写入目标用户上下文，当前用户表格会在主线程刷新。
+        """
+        self.runtime.update_course_attempt(
+            profile_id,
+            task_id,
+            status,
+            message,
+            attempt_count,
+        )
+        self.root.after(
+            0,
+            lambda: self.refresh_course_attempt_table(profile_id),
+        )
+
+    def refresh_course_attempt_table(
+        self: "CourseSelectionApp", profile_id: str
+    ) -> None:
+        """在抢课状态变化后刷新当前可见用户的待抢表。
+
+        Args:
+            self: 当前课程助手应用实例。
+            profile_id: 状态发生变化的用户 UUID。
+
+        Returns:
+            None: 非当前用户或界面尚未创建时不刷新表格。
+        """
+        if (
+            hasattr(self, "course_tree")
+            and self.current_profile_id() == profile_id
+        ):
+            self.update_course_list()
 
     def remove_course(self: "CourseSelectionApp") -> None:
         """删除当前用户选中的待抢课程并保存草稿。
@@ -4295,6 +4476,13 @@ class CourseSelectionApp:
             except RuntimeError as error:
                 messagebox.showwarning("警告", str(error))
                 return
+            task_ids = [
+                str(course["data"].get("p_id", ""))
+                for course in courses
+                if isinstance(course.get("data"), dict)
+            ]
+            self.runtime.reset_course_attempts(context.profile.id, task_ids)
+            self.update_course_list()
             worker = threading.Thread(
                 target=self.auto_selection_process,
                 args=(
@@ -4506,6 +4694,18 @@ class CourseSelectionApp:
             except RuntimeError as error:
                 messagebox.showwarning("警告", str(error))
                 return
+            task_ids = [
+                str(course["data"].get("p_id", ""))
+                for course in courses
+                if isinstance(course.get("data"), dict)
+            ]
+            self.runtime.reset_course_attempts(
+                context.profile.id,
+                task_ids,
+                status="等待定时",
+                message=f"计划在 {target_time:%H:%M:%S} 开始",
+            )
+            self.update_course_list()
             worker = threading.Thread(
                 target=self._timed_polling_worker,
                 args=(
@@ -5095,7 +5295,15 @@ class CourseSelectionApp:
         priority_groups: dict[int, list[dict[str, object]]] = defaultdict(list)
         for course in sorted(courses, key=lambda item: int(item["priority"])):
             priority_groups[int(course["priority"])].append(course)
+        task_ids = [
+            str(course["data"].get("p_id", ""))
+            for course in courses
+            if isinstance(course.get("data"), dict)
+        ]
+        self.runtime.reset_course_attempts(profile_id, task_ids)
+        self.root.after(0, lambda: self.refresh_course_attempt_table(profile_id))
         failed_course_ids: set[str] = set()
+        attempt_counts: dict[str, int] = defaultdict(int)
         any_success = False
         stop_after_success = False
         session_expired = False
@@ -5122,19 +5330,39 @@ class CourseSelectionApp:
                             continue
                         if stop_event.wait(3.5):
                             break
+                        request_count += 1
+                        attempt_counts[course_task_id] += 1
+                        attempt_number = attempt_counts[course_task_id]
+                        self.record_course_attempt(
+                            profile_id,
+                            course_task_id,
+                            "正在请求",
+                            "等待接口返回",
+                            attempt_number,
+                        )
                         try:
                             response = session.post(
                                 "https://byyt.ustb.edu.cn/Xsxk/addGouwuche",
                                 data=raw_data,
                                 timeout=10,
                             )
-                            request_count += 1
                             response_text = response.text.strip()
+                            response_summary = (
+                                f"HTTP {response.status_code} | "
+                                f"{response_text or '空响应'}"
+                            )
                             self.user_log(
                                 profile_id,
                                 f"[{request_count}] {course['name']} | HTTP {response.status_code} | {response_text[:160]}",
                             )
                         except requests.RequestException as error:
+                            self.record_course_attempt(
+                                profile_id,
+                                course_task_id,
+                                "请求失败",
+                                str(error),
+                                attempt_number,
+                            )
                             self.user_log(
                                 profile_id,
                                 f"[{request_count}] 请求失败（{course['name']}）：{error}",
@@ -5142,11 +5370,25 @@ class CourseSelectionApp:
                             has_retryable_course = True
                             continue
                         if response.status_code in {401, 403}:
+                            self.record_course_attempt(
+                                profile_id,
+                                course_task_id,
+                                "请求失败",
+                                response_summary,
+                                attempt_number,
+                            )
                             session_expired = True
                             stop_event.set()
                             break
-                        lowered = response_text.lower()
-                        if "success" in lowered or "成功" in response_text:
+                        business_status = classify_selection_response(response_text)
+                        self.record_course_attempt(
+                            profile_id,
+                            course_task_id,
+                            business_status,
+                            response_summary,
+                            attempt_number,
+                        )
+                        if business_status == "选课成功":
                             any_success = True
                             failed_course_ids.add(course_task_id)
                             success_message = (
@@ -5162,13 +5404,15 @@ class CourseSelectionApp:
                                     ),
                                 )
                                 break
-                        elif "冲突" in response_text or "不符合" in response_text:
+                        elif business_status == "不符合选课要求":
                             failed_course_ids.add(course_task_id)
-                        elif "full" in lowered or "已满" in response_text:
+                        elif business_status == "课程容量已满":
                             if retry_full:
                                 has_retryable_course = True
                             else:
                                 failed_course_ids.add(course_task_id)
+                        elif business_status == "不在设定的选课时间范围内":
+                            has_retryable_course = True
                         else:
                             has_retryable_course = True
                     remaining_courses = [

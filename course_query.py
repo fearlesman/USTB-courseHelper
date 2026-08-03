@@ -113,7 +113,7 @@ def build_course_query_payload(
     course_type_code: str,
     criteria: CourseSearchCriteria,
     page_number: int = 1,
-    page_size: int = 17,
+    page_size: int = 100,
 ) -> dict[str, str]:
     """
     构造选课任务接口的联合查询负载。

@@ -62,6 +62,7 @@ def test_build_course_query_payload_combines_code_and_name_criteria() -> None:
     assert "p_kc_gjz" not in payload
     assert "p_kclb" not in payload
     assert payload["p_xnxq"] == "2026-20271"
+    assert payload["pageSize"] == "100"
     assert all(value != "" for value in payload.values())
 
 

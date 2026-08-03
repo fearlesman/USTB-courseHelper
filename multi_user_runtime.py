@@ -7,7 +7,7 @@ import threading
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from user_profiles import UserProfile, UserProfileStore, UserProfileStoreError
 
@@ -34,6 +34,15 @@ class UserTaskState(str, Enum):
     STOPPED = "已停止"
 
 
+@dataclass(frozen=True)
+class CourseAttemptState:
+    """保存单门课程最近一次抢课尝试的运行期状态。"""
+
+    status: str = "等待抢课"
+    message: str = "等待按优先级尝试"
+    attempt_count: int = 0
+
+
 @dataclass
 class UserRuntimeContext:
     """保存一名用户仅在当前进程中存在的运行状态。
@@ -58,6 +67,7 @@ class UserRuntimeContext:
         current_saved_list_dirty: 当前课程是否有未保存变化。
         search_results_by_task_id: 该用户最近一次查询结果映射。
         search_result_course_types_by_task_id: 查询结果的选课方式映射。
+        course_attempts: 按课程任务 ID 保存的实时抢课状态。
     """
 
     profile: UserProfile
@@ -79,6 +89,7 @@ class UserRuntimeContext:
     current_saved_list_dirty: bool = False
     search_results_by_task_id: dict[str, Any] = field(default_factory=dict)
     search_result_course_types_by_task_id: dict[str, str] = field(default_factory=dict)
+    course_attempts: dict[str, CourseAttemptState] = field(default_factory=dict)
 
 
 class MultiUserRuntime:
@@ -100,6 +111,7 @@ class MultiUserRuntime:
         self.contexts: dict[str, UserRuntimeContext] = {}
         self.active_profile_id: str | None = None
         self._login_lock = threading.Lock()
+        self._attempt_lock = threading.Lock()
         self._login_profile_id: str | None = None
         self.sync_profiles()
 
@@ -422,6 +434,83 @@ class MultiUserRuntime:
             可供后台任务稳定使用的课程快照。
         """
         return copy.deepcopy(self.require_context(profile_id).courses)
+
+    def reset_course_attempts(
+        self,
+        profile_id: str,
+        task_ids: Sequence[str],
+        status: str = "等待抢课",
+        message: str = "等待按优先级尝试",
+    ) -> None:
+        """重置指定用户本轮任务的逐课程尝试状态。
+
+        Args:
+            profile_id: 用户 UUID。
+            task_ids: 本轮任务包含的课程任务 ID 序列。
+            status: 每门课程的初始状态文本。
+            message: 每门课程的初始返回信息。
+
+        Returns:
+            None: 旧状态会被本轮课程的初始状态整体替换。
+        """
+        normalized_ids = [str(task_id) for task_id in task_ids if str(task_id)]
+        with self._attempt_lock:
+            self.require_context(profile_id).course_attempts = {
+                task_id: CourseAttemptState(status=status, message=message)
+                for task_id in normalized_ids
+            }
+
+    def update_course_attempt(
+        self,
+        profile_id: str,
+        task_id: str,
+        status: str,
+        message: str,
+        attempt_count: int,
+    ) -> None:
+        """更新一门课程最近一次抢课尝试的状态。
+
+        Args:
+            profile_id: 用户 UUID。
+            task_id: 课程任务 ID。
+            status: 需要显示的业务状态或请求状态。
+            message: 接口返回或异常摘要。
+            attempt_count: 本轮任务中该课程已经尝试的次数。
+
+        Returns:
+            None: 状态仅写入内存中的用户运行时上下文。
+
+        Raises:
+            ValueError: 课程任务 ID 为空或尝试次数小于零时抛出。
+        """
+        normalized_id = str(task_id).strip()
+        if not normalized_id:
+            raise ValueError("课程任务 ID 不能为空")
+        if attempt_count < 0:
+            raise ValueError("课程尝试次数不能小于零")
+        with self._attempt_lock:
+            self.require_context(profile_id).course_attempts[normalized_id] = (
+                CourseAttemptState(
+                    status=str(status),
+                    message=str(message),
+                    attempt_count=attempt_count,
+                )
+            )
+
+    def course_attempt(
+        self, profile_id: str, task_id: str
+    ) -> CourseAttemptState | None:
+        """返回指定用户一门课程的最近尝试状态。
+
+        Args:
+            profile_id: 用户 UUID。
+            task_id: 课程任务 ID。
+
+        Returns:
+            不可变的课程尝试状态；本轮尚无记录时返回 None。
+        """
+        with self._attempt_lock:
+            return self.require_context(profile_id).course_attempts.get(str(task_id))
 
     def _release_login(self, profile_id: str) -> None:
         """在归属匹配时释放扫码登录锁。

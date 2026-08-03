@@ -150,3 +150,30 @@ def test_context_queries_filter_enabled_and_active_tasks(tmp_path: Path) -> None
     assert isinstance(enabled, tuple)
     assert [context.profile.id for context in enabled] == [first.id, second.id]
     assert [context.profile.id for context in active_tasks] == [second.id]
+
+
+def test_course_attempt_states_are_isolated_by_user(tmp_path: Path) -> None:
+    """验证每门课程的实时抢课状态按用户隔离。
+
+    Args:
+        tmp_path: pytest 临时目录。
+
+    Returns:
+        None: 通过断言验证状态、返回信息和尝试次数不会串用户。
+    """
+    runtime, first_id, second_id = _runtime(tmp_path)
+
+    runtime.reset_course_attempts(first_id, ["[[TASK_A]]"])
+    runtime.update_course_attempt(
+        first_id,
+        "[[TASK_A]]",
+        "等待重试",
+        "HTTP 200 | [[FULL_RESPONSE]]",
+        3,
+    )
+
+    first_state = runtime.course_attempt(first_id, "[[TASK_A]]")
+    assert first_state.status == "等待重试"
+    assert first_state.message == "HTTP 200 | [[FULL_RESPONSE]]"
+    assert first_state.attempt_count == 3
+    assert runtime.course_attempt(second_id, "[[TASK_A]]") is None
