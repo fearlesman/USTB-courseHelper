@@ -2177,6 +2177,14 @@ class CourseSelectionApp:
             style="Secondary.TButton",
         )
         self.add_selected_course_btn.grid(row=0, column=3, padx=(12, 0))
+        self.search_priority_help_label = ttk.Label(
+            result_toolbar,
+            text="优先级说明：数字越小越先尝试；相同数字按列表顺序执行。",
+            style="SurfaceMuted.TLabel",
+        )
+        self.search_priority_help_label.grid(
+            row=1, column=1, columnspan=3, sticky="e", pady=(5, 0)
+        )
 
         result_columns = tuple(field_name for field_name, _ in DISPLAY_COLUMNS)
         self.course_result_tree = ttk.Treeview(
@@ -2400,6 +2408,14 @@ class CourseSelectionApp:
             style="Secondary.TButton",
         )
         self.remove_course_btn.grid(row=0, column=2)
+        self.task_priority_help_label = ttk.Label(
+            list_toolbar,
+            text="优先级说明：数字越小越先尝试；相同数字按列表顺序执行。",
+            style="SurfaceMuted.TLabel",
+        )
+        self.task_priority_help_label.grid(
+            row=1, column=0, columnspan=3, sticky="w", pady=(5, 0)
+        )
 
         table_body = ttk.Frame(list_frame, style="TFrame")
         table_body.grid(row=1, column=0, columnspan=2, sticky="nsew")
@@ -3669,21 +3685,41 @@ class CourseSelectionApp:
             })
             result_by_task_id: dict[str, CourseSearchResult] = {}
             course_type_by_task_id: dict[str, str] = {}
+            failed_type_codes: list[str] = []
+            successful_type_count = 0
             for course_type_code, payload in payloads:
-                response = session.post(
-                    "https://byyt.ustb.edu.cn/Xsxk/queryKxrw",
-                    data=payload,
-                    timeout=30,
-                )
-                response.raise_for_status()
-                for result in extract_course_search_results(orjson.loads(response.content)):
+                try:
+                    response = session.post(
+                        "https://byyt.ustb.edu.cn/Xsxk/queryKxrw",
+                        data=payload,
+                        timeout=30,
+                    )
+                    response.raise_for_status()
+                    response_results = extract_course_search_results(
+                        orjson.loads(response.content)
+                    )
+                except Exception as error:
+                    failed_type_codes.append(course_type_code)
+                    self.user_log(
+                        profile_id,
+                        f"课程类型 {course_type_code} 查询失败：{error}",
+                    )
+                    continue
+                successful_type_count += 1
+                for result in response_results:
                     result_by_task_id.setdefault(result.task_id, result)
                     course_type_by_task_id.setdefault(result.task_id, course_type_code)
+            if successful_type_count == 0:
+                failed_summary = "、".join(failed_type_codes)
+                raise RuntimeError(f"所有课程类型查询均失败：{failed_summary}")
             results = list(result_by_task_id.values())
             self.root.after(
                 0,
                 lambda: self.show_course_search_results(
-                    profile_id, results, course_type_by_task_id
+                    profile_id,
+                    results,
+                    course_type_by_task_id,
+                    len(failed_type_codes),
                 ),
             )
         except Exception as error:
@@ -3698,6 +3734,7 @@ class CourseSelectionApp:
         profile_id: str,
         results: list[CourseSearchResult],
         course_type_by_task_id: dict[str, str],
+        failed_type_count: int = 0,
     ) -> None:
         """
         清空并填充课程查询结果表。
@@ -3707,6 +3744,7 @@ class CourseSelectionApp:
             profile_id: 发起查询的用户 UUID。
             results: 已完成空值清理和字段映射的查询结果。
             course_type_by_task_id: 每条结果对应的选课方式代码。
+            failed_type_count: 本次汇总中请求失败的课程类型数量。
 
         Returns:
             None: 结果直接渲染到 Treeview 控件。
@@ -3717,14 +3755,26 @@ class CourseSelectionApp:
         }
         context.search_result_course_types_by_task_id = dict(course_type_by_task_id)
         if self.current_profile_id() != profile_id:
-            self.user_log(profile_id, f"查询完成，共 {len(results)} 门课程")
+            result_message = f"查询完成，共 {len(results)} 门课程"
+            if failed_type_count:
+                result_message += f"，{failed_type_count} 个课程类型查询失败"
+            self.user_log(profile_id, result_message)
             self.refresh_user_views()
             return
         self.search_results_by_task_id = dict(context.search_results_by_task_id)
         self.search_result_course_types_by_task_id = dict(
             context.search_result_course_types_by_task_id
         )
-        self.render_course_search_results(results)
+        self.render_course_search_results(
+            results, notify_empty=failed_type_count == 0
+        )
+        if failed_type_count:
+            self.search_count_var.set(
+                f"共汇总 {len(results)} 门课程（{failed_type_count} 个类型查询失败）"
+            )
+            self.status_var.set(
+                f"已汇总 {len(results)} 门课程；{failed_type_count} 个课程类型查询失败"
+            )
 
     def render_course_search_results(
         self: "CourseSelectionApp",
@@ -3842,7 +3892,6 @@ class CourseSelectionApp:
         self.update_course_list()
         self.status_var.set(f"已添加 {added_count} 门课程")
         messagebox.showinfo("成功", f"已添加 {added_count} 门课程")
-        self.show_rush_tab()
 
     def add_course(self):
         global final_cookies_dict, course_data_list

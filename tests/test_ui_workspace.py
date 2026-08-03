@@ -294,6 +294,68 @@ def test_add_selected_courses_requires_current_student(
     assert messages == [("错误", "请先在抢课任务页设置抢课人员")]
 
 
+def test_add_selected_courses_stays_on_course_search_page(
+    app_module: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """验证成功添加课程后继续停留在课程查询页。
+
+    Args:
+        app_module: 已加载的课程助手入口模块。
+        monkeypatch: pytest 提供的运行时替换工具。
+        tmp_path: pytest 临时目录。
+
+    Returns:
+        None: 通过断言验证课程已加入且页面没有自动跳转。
+    """
+    store = UserProfileStore(tmp_path)
+    profile = store.create("[[USER_A]]")
+    app = _make_navigation_app(app_module)
+    app.profile_store = store
+    app.runtime = MultiUserRuntime(store)
+    app.runtime.select_profile(profile.id)
+    app.tab_control.selected = app.course_search_tab
+    app.course_result_tree = FakeTree()
+    app.priority_var = FakeVariable()
+    app.priority_var.set("1")
+    app.semester_var = FakeVariable()
+    app.semester_var.set("2026-2027-1")
+    result = type(
+        "CourseResult",
+        (),
+        {
+            "task_id": "[[COURSE_TASK_ID]]",
+            "category_code": "[[CATEGORY_CODE]]",
+            "course_name": "[[COURSE_NAME]]",
+            "teacher": "[[TEACHER_NAME]]",
+            "course_code": "[[COURSE_CODE]]",
+            "schedule": "[[SCHEDULE]]",
+        },
+    )()
+    app.search_results_by_task_id = {result.task_id: result}
+    app.search_result_course_types_by_task_id = {
+        result.task_id: "zytzk-b-b"
+    }
+    app.status_var = FakeVariable()
+    app.cache_course_info = lambda *args: None
+    app.mark_current_list_dirty = lambda: None
+    app.save_course_list = lambda: True
+    app.update_course_list = lambda: None
+    messages: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        app_module.messagebox,
+        "showinfo",
+        lambda title, message: messages.append((title, message)),
+    )
+
+    app.add_selected_courses()
+
+    assert len(app.runtime.require_context(profile.id).courses) == 1
+    assert app.tab_control.selected is app.course_search_tab
+    assert messages == [("成功", "已添加 1 门课程")]
+
+
 def test_start_auto_selection_opens_rush_page_without_numeric_index(
     app_module: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -400,6 +462,12 @@ def test_tk_workspace_builds_progressive_account_controls_and_two_pages(
         assert app.current_list_name_var.get() == "未命名列表"
         assert app.save_rush_list_btn.winfo_exists()
         assert app.manage_rush_lists_btn.winfo_exists()
+        assert app.search_priority_help_label.cget("text") == (
+            "优先级说明：数字越小越先尝试；相同数字按列表顺序执行。"
+        )
+        assert app.task_priority_help_label.cget("text") == (
+            "优先级说明：数字越小越先尝试；相同数字按列表顺序执行。"
+        )
         assert not hasattr(app, "clear_log_btn")
 
         class CompletedWarmup:

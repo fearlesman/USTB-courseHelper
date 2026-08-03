@@ -187,6 +187,162 @@ def test_query_result_remains_bound_to_origin_user(
     assert rendered == []
 
 
+def test_all_course_types_continue_after_failure_and_aggregate_results(
+    app_module: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """验证“所有”查询会尝试全部类型并汇总成功响应。
+
+    Args:
+        app_module: 已加载的课程助手入口模块。
+        tmp_path: pytest 临时目录。
+        monkeypatch: pytest 提供的运行时替换工具。
+
+    Returns:
+        None: 通过断言验证单类失败不会阻止后续查询和去重汇总。
+    """
+    class FakeResponse:
+        """提供课程接口响应或请求失败的测试替身。"""
+
+        def __init__(self, content: bytes, failed: bool = False) -> None:
+            """保存响应内容和失败标志。
+
+            Args:
+                content: 模拟 JSON 响应字节。
+                failed: True 表示状态检查需要抛出异常。
+
+            Returns:
+                None: 参数保存在实例属性中。
+            """
+            self.content = content
+            self.failed = failed
+
+        def raise_for_status(self) -> None:
+            """模拟 HTTP 状态检查。
+
+            Args:
+                None.
+
+            Returns:
+                None: 成功状态不执行额外操作。
+
+            Raises:
+                RuntimeError: 当前响应被标记为失败时抛出。
+            """
+            if self.failed:
+                raise RuntimeError("[[TYPE_QUERY_ERROR]]")
+
+    requested_types: list[str] = []
+    professional_payload = app_module.orjson.dumps(
+        {
+            "kxrwList": {
+                "list": [
+                    {
+                        "id": "[[PRO_TASK]]",
+                        "kclb": "[[PRO_CATEGORY]]",
+                        "kcdm": "[[PRO_CODE]]",
+                        "kcmc": "[[PRO_COURSE]]",
+                    }
+                ]
+            }
+        }
+    )
+    mooc_payload = app_module.orjson.dumps(
+        {
+            "kxrwList": {
+                "list": [
+                    {
+                        "id": "[[MOOC_TASK]]",
+                        "kclb": "[[MOOC_CATEGORY]]",
+                        "kcdm": "[[MOOC_CODE]]",
+                        "kcmc": "[[MOOC_COURSE]]",
+                    }
+                ]
+            }
+        }
+    )
+
+    class FakeSession:
+        """按课程类型返回不同结果的会话替身。"""
+
+        def __init__(self) -> None:
+            """初始化 Cookie 和请求头容器。
+
+            Args:
+                None.
+
+            Returns:
+                None: 空容器保存在实例属性中。
+            """
+            self.cookies: dict[str, str] = {}
+            self.headers: dict[str, str] = {}
+
+        def post(
+            self,
+            url: str,
+            data: dict[str, str],
+            timeout: int,
+        ) -> FakeResponse:
+            """根据选课方式代码返回模拟结果。
+
+            Args:
+                url: 被忽略的课程查询地址。
+                data: 包含选课方式代码的请求负载。
+                timeout: 被忽略的请求超时秒数。
+
+            Returns:
+                对应课程类型的模拟响应。
+            """
+            course_type = data["p_xkfsdm"]
+            requested_types.append(course_type)
+            responses = {
+                "sztzk-b-b": FakeResponse(b"{}", failed=True),
+                "zytzk-b-b": FakeResponse(professional_payload),
+                "mooc-b-b": FakeResponse(mooc_payload),
+                "bx-b-b": FakeResponse(professional_payload),
+            }
+            return responses[course_type]
+
+    app, profile_id, _ = _make_app(app_module, tmp_path)
+    app.apply_active_user_control_state = lambda: None
+    logs: list[str] = []
+    app.user_log = lambda target_id, message: logs.append(message)
+    shown: list[tuple[list[object], dict[str, str], int]] = []
+    app.show_course_search_results = (
+        lambda target_id, results, type_by_task_id, failed_count=0: shown.append(
+            (list(results), dict(type_by_task_id), failed_count)
+        )
+    )
+    errors: list[str] = []
+    monkeypatch.setattr(app_module.requests, "Session", FakeSession)
+    monkeypatch.setattr(
+        app_module.messagebox,
+        "showerror",
+        lambda title, message: errors.append(message),
+    )
+    course_types = ["sztzk-b-b", "zytzk-b-b", "mooc-b-b", "bx-b-b"]
+    payloads = [
+        (course_type, {"p_xkfsdm": course_type})
+        for course_type in course_types
+    ]
+
+    app.query_course_results(profile_id, {"SESSION": "[[COOKIE_A]]"}, payloads)
+
+    assert requested_types == course_types
+    assert [result.task_id for result in shown[0][0]] == [
+        "[[PRO_TASK]]",
+        "[[MOOC_TASK]]",
+    ]
+    assert shown[0][1] == {
+        "[[PRO_TASK]]": "zytzk-b-b",
+        "[[MOOC_TASK]]": "mooc-b-b",
+    }
+    assert shown[0][2] == 1
+    assert any("sztzk-b-b" in message for message in logs)
+    assert errors == []
+
+
 def test_switch_user_persists_and_loads_runtime_settings(
     app_module: ModuleType, tmp_path: Path
 ) -> None:
