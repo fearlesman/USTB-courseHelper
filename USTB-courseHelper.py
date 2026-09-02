@@ -21,6 +21,7 @@ from browser_driver import (
     is_qr_login_expired,
 )
 from course_query import (
+    COURSE_TYPE_DEFINITIONS,
     DISPLAY_COLUMNS,
     CourseSearchCriteria,
     CourseSearchResult,
@@ -54,13 +55,17 @@ stop_selection = False     # 是否请求停止
 online_thread_running = False  # 是否正在运行online线程gio
 
 SELECTION_RESULT_CODE_STATUSES: dict[str, str] = {
+    "OPERATE.RESULT_SUCCESS": "选课成功",
     "XKGL.OPERATE.RESULT_YCGDWRL": "课程容量已满",
     "XKGL.OPERATE.RESULT_YCGZRL": "课程容量已满",
     "XKGL.OPERATE.RESULT_XKSJCTDQRWHCTRWH": "不符合选课要求",
+    "XKGL.OPERATE.RESULT_BZXKSJN": "不在设定的选课时间范围内",
 }
 SELECTION_MESSAGE_STATUSES: tuple[tuple[str, str], ...] = (
     ("不在设定的选课时间范围内", "不在设定的选课时间范围内"),
+    ("不在设置的时间范围内", "不在设定的选课时间范围内"),
     ("选课成功", "选课成功"),
+    ("该课程/项目已选，不可重复选课", "选课成功"),
     ("课程容量已满", "课程容量已满"),
     ("不符合选课要求", "不符合选课要求"),
     ("对外容量已满", "课程容量已满"),
@@ -94,6 +99,8 @@ def classify_selection_response(response_text: str) -> str:
         response_message = parsed_response.get("message")
         if isinstance(response_message, str):
             message_text = response_message.strip()
+        if parsed_response.get("jg") == "1" or message_text == "操作成功":
+            return "选课成功"
     for message_fragment, business_status in SELECTION_MESSAGE_STATUSES:
         if message_fragment in message_text:
             return business_status
@@ -2165,7 +2172,7 @@ class CourseSelectionApp:
         self.course_type_combo = ttk.Combobox(
             input_frame,
             textvariable=self.course_type_var,
-            values=["所有", "素质扩展课", "专业扩展课", "MOOC", "必修课"],
+            values=["所有", *(label for label, _ in COURSE_TYPE_DEFINITIONS)],
             state="readonly",
             width=16,
         )
@@ -3669,12 +3676,7 @@ class CourseSelectionApp:
             messagebox.showerror("错误", "请先登录")
             return
 
-        course_type_codes = {
-            "素质扩展课": "sztzk-b-b",
-            "专业扩展课": "zytzk-b-b",
-            "MOOC": "mooc-b-b",
-            "必修课": "bx-b-b",
-        }
+        course_type_codes = dict(COURSE_TYPE_DEFINITIONS)
         selected_course_type = self.course_type_var.get()
         if selected_course_type not in {"所有", *course_type_codes}:
             messagebox.showerror("错误", "课程类型无效")
@@ -3869,10 +3871,7 @@ class CourseSelectionApp:
             self, "search_type_summary_var"
         ):
             type_labels = {
-                "sztzk-b-b": "素质扩展课",
-                "zytzk-b-b": "专业扩展课",
-                "mooc-b-b": "MOOC",
-                "bx-b-b": "必修课",
+                code: label for label, code in COURSE_TYPE_DEFINITIONS
             }
             summary_parts = [
                 f"{type_labels.get(code, code)} {count}"
@@ -3976,7 +3975,7 @@ class CourseSelectionApp:
                     "p_kclb": result.category_code,
                     "p_id": result.task_id,
                 },
-                "name": result.course_name,
+                "name": result.display_name,
                 "teacher": result.teacher,
                 "course_id": result.course_code,
                 "schedule": result.schedule,
@@ -3986,7 +3985,7 @@ class CourseSelectionApp:
                 result.course_code,
                 f"{academic_year}{term}",
                 {
-                    "name": result.course_name,
+                    "name": result.display_name,
                     "teacher": result.teacher,
                     "p_id": result.task_id,
                     "p_kclb": result.category_code,
@@ -4017,15 +4016,8 @@ class CourseSelectionApp:
             return
 
         course_type_text = self.course_type_var.get()
-        if course_type_text == "素质扩展课":
-            p_xkfsdm = "sztzk-b-b"
-        elif course_type_text == "专业扩展课":
-            p_xkfsdm = "zytzk-b-b"
-        elif course_type_text == "MOOC":
-            p_xkfsdm = "mooc-b-b"
-        elif course_type_text == "必修课":
-            p_xkfsdm = "bx-b-b"
-        else:
+        p_xkfsdm = dict(COURSE_TYPE_DEFINITIONS).get(course_type_text)
+        if p_xkfsdm is None:
             messagebox.showerror("错误", "课程类型无效")
             return
 

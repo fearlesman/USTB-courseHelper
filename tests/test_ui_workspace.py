@@ -55,6 +55,17 @@ class FakeNotebook:
 class FakeTree:
     """提供课程结果选择项的最小 Treeview 替身。"""
 
+    def __init__(self, task_id: str = "[[COURSE_TASK_ID]]") -> None:
+        """初始化指定教学班 ID 的选择替身。
+
+        Args:
+            task_id: 选择结果返回的合成教学班 ID。
+
+        Returns:
+            None: 教学班 ID 保存在实例属性中。
+        """
+        self.task_id = task_id
+
     def selection(self) -> tuple[str, ...]:
         """返回一条模拟的课程任务选择。
 
@@ -64,7 +75,7 @@ class FakeTree:
         Returns:
             包含模拟任务 ID 的元组。
         """
-        return ("[[COURSE_TASK_ID]]",)
+        return (self.task_id,)
 
 
 class FakeWidget:
@@ -316,7 +327,7 @@ def test_add_selected_courses_stays_on_course_search_page(
     app.runtime = MultiUserRuntime(store)
     app.runtime.select_profile(profile.id)
     app.tab_control.selected = app.course_search_tab
-    app.course_result_tree = FakeTree()
+    app.course_result_tree = FakeTree("[[SPORTS_TASK_ID]]")
     app.priority_var = FakeVariable()
     app.priority_var.set("1")
     app.semester_var = FakeVariable()
@@ -325,20 +336,22 @@ def test_add_selected_courses_stays_on_course_search_page(
         "CourseResult",
         (),
         {
-            "task_id": "[[COURSE_TASK_ID]]",
-            "category_code": "[[CATEGORY_CODE]]",
-            "course_name": "[[COURSE_NAME]]",
+            "task_id": "[[SPORTS_TASK_ID]]",
+            "category_code": "19",
+            "display_name": "体育III(乒乓球)",
+            "course_name": "体育III",
             "teacher": "[[TEACHER_NAME]]",
-            "course_code": "[[COURSE_CODE]]",
-            "schedule": "[[SCHEDULE]]",
+            "course_code": "11101013",
+            "schedule": "1-16周,星期三第3-4节 体育馆",
         },
     )()
     app.search_results_by_task_id = {result.task_id: result}
     app.search_result_course_types_by_task_id = {
-        result.task_id: "zytzk-b-b"
+        result.task_id: "bx-b-b-ty3"
     }
     app.status_var = FakeVariable()
-    app.cache_course_info = lambda *args: None
+    app.course_cache = {}
+    app.cache_file = str(tmp_path / "course_cache.json")
     app.mark_current_list_dirty = lambda: None
     app.save_course_list = lambda: True
     app.update_course_list = lambda: None
@@ -351,7 +364,18 @@ def test_add_selected_courses_stays_on_course_search_page(
 
     app.add_selected_courses()
 
-    assert len(app.runtime.require_context(profile.id).courses) == 1
+    courses = app.runtime.require_context(profile.id).courses
+    assert len(courses) == 1
+    assert courses[0]["name"] == "体育III(乒乓球)"
+    assert courses[0]["data"] == {
+        "p_xktjz": "rwtjzyx",
+        "p_xn": "2026-2027",
+        "p_xq": "1",
+        "p_xkfsdm": "bx-b-b-ty3",
+        "p_kclb": "19",
+        "p_id": "[[SPORTS_TASK_ID]]",
+    }
+    assert app.course_cache["2026-20271_11101013"][0]["name"] == "体育III(乒乓球)"
     assert app.tab_control.selected is app.course_search_tab
     assert messages == [("成功", "已添加 1 门课程")]
 
@@ -431,6 +455,7 @@ def test_tk_workspace_builds_progressive_account_controls_and_two_pages(
             for index in range(app.tab_control.index("end"))
         ]
         assert tab_names == ["课程查询", "抢课任务"]
+        assert "体育III" in app.course_type_combo.cget("values")
         assert not hasattr(app, "global_user_combo")
         assert app.global_login_state_var.get()
         assert app.global_task_state_var.get() == ""

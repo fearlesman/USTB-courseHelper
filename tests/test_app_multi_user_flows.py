@@ -262,6 +262,28 @@ def test_all_course_types_continue_after_failure_and_aggregate_results(
             }
         }
     )
+    sports_payload = app_module.orjson.dumps(
+        {
+            "kxrwList": {
+                "list": [
+                    {
+                        "id": "[[SPORTS_TASK_ID]]",
+                        "rwmc": "体育III(乒乓球)",
+                        "kcdm": "11101013",
+                        "kcmc": "体育III",
+                        "kclb": "19",
+                        "kclbmc": "通识课程",
+                        "dgjsmc": "[[SPORTS_TEACHER]]",
+                        "zrl": "34",
+                        "yxzrs": "0",
+                        "kcxx": "<div class='ivu-tag-cyan'><span class='ivu-tag-text'>"
+                        "[[SPORTS_SCHEDULE]]</span></div>",
+                        "xiaoqumc": "校本部",
+                    }
+                ]
+            }
+        }
+    )
 
     class FakeSession:
         """按课程类型返回不同结果的会话替身。"""
@@ -301,6 +323,7 @@ def test_all_course_types_continue_after_failure_and_aggregate_results(
                 "zytzk-b-b": FakeResponse(professional_payload),
                 "mooc-b-b": FakeResponse(mooc_payload),
                 "bx-b-b": FakeResponse(professional_payload),
+                "bx-b-b-ty3": FakeResponse(sports_payload),
             }
             return responses[course_type]
 
@@ -327,7 +350,10 @@ def test_all_course_types_continue_after_failure_and_aggregate_results(
         "showerror",
         lambda title, message: errors.append(message),
     )
-    course_types = ["sztzk-b-b", "zytzk-b-b", "mooc-b-b", "bx-b-b"]
+    course_types = [
+        course_type_code
+        for _, course_type_code in app_module.COURSE_TYPE_DEFINITIONS
+    ]
     payloads = [
         (course_type, {"p_xkfsdm": course_type})
         for course_type in course_types
@@ -339,10 +365,12 @@ def test_all_course_types_continue_after_failure_and_aggregate_results(
     assert [result.task_id for result in shown[0][0]] == [
         "[[PRO_TASK]]",
         "[[MOOC_TASK]]",
+        "[[SPORTS_TASK_ID]]",
     ]
     assert shown[0][1] == {
         "[[PRO_TASK]]": "zytzk-b-b",
         "[[MOOC_TASK]]": "mooc-b-b",
+        "[[SPORTS_TASK_ID]]": "bx-b-b-ty3",
     }
     assert shown[0][2] == 1
     assert shown[0][3] == {
@@ -350,6 +378,7 @@ def test_all_course_types_continue_after_failure_and_aggregate_results(
         "zytzk-b-b": 1,
         "mooc-b-b": 1,
         "bx-b-b": 1,
+        "bx-b-b-ty3": 1,
     }
     assert any("sztzk-b-b" in message for message in logs)
     assert errors == []
@@ -487,6 +516,11 @@ def test_course_type_query_fetches_later_pages(
     [
         ("[[SUCCESS_RESPONSE]] 选课成功", "选课成功"),
         (
+            '{"gjhczztm":"OPERATE.RESULT_SUCCESS",'
+            '"message":"操作成功","jg":"1"}',
+            "选课成功",
+        ),
+        (
             '{"gjhczztm":"XKGL.OPERATE.RESULT_XKSJCTDQRWHCTRWH",'
             '"message":"上课时间冲突，当前课程：[[COURSE_NAME]]，'
             '冲突课程：[[CONFLICT_COURSE]]","detail":"'
@@ -578,6 +612,10 @@ def test_selection_worker_records_course_response_in_runtime(
             """
             self.text = response_text
 
+    requested_payloads: list[dict[str, object]] = []
+
+    requested_task_ids: list[str] = []
+
     class FakeSession:
         """提供抢课请求的会话替身。"""
 
@@ -603,12 +641,14 @@ def test_selection_worker_records_course_response_in_runtime(
 
             Args:
                 url: 被忽略的抢课地址。
-                data: 被忽略的课程请求参数。
+                data: 本次提交的抢课请求参数。
                 timeout: 被忽略的超时秒数。
 
             Returns:
                 抢课响应替身。
             """
+            requested_payloads.append(dict(data))
+            requested_task_ids.append(str(data["p_id"]))
             return FakeResponse()
 
     app, profile_id, _ = _make_app(app_module, tmp_path)
@@ -621,29 +661,83 @@ def test_selection_worker_records_course_response_in_runtime(
         "priority": 1,
         "name": "[[COURSE_NAME]]",
         "teacher": "[[TEACHER_NAME]]",
-        "data": {"p_id": "[[COURSE_TASK_ID]]"},
+        "data": {
+            "p_xktjz": "rwtjzyx",
+            "p_xn": "2026-2027",
+            "p_xq": "1",
+            "p_xkfsdm": "bx-b-b-ty3",
+            "p_kclb": "19",
+            "p_id": "[[SPORTS_TASK_ID]]",
+        },
     }
+    backup_course = {
+        "id": 2,
+        "priority": 2,
+        "name": "[[BACKUP_COURSE_NAME]]",
+        "teacher": "[[BACKUP_TEACHER_NAME]]",
+        "data": {
+            "p_xktjz": "rwtjzyx",
+            "p_xn": "2026-2027",
+            "p_xq": "1",
+            "p_xkfsdm": "bx-b-b-ty3",
+            "p_kclb": "19",
+            "p_id": "[[BACKUP_TASK_ID]]",
+        },
+    }
+
+    courses = [course]
+    if "OPERATE.RESULT_SUCCESS" in response_text:
+        courses.append(backup_course)
 
     app._run_user_selection(
         profile_id,
         {"SESSION": "[[COOKIE_A]]"},
-        [course],
+        courses,
         FakeStopEvent(),
         True,
         True,
     )
 
-    state = app.runtime.course_attempt(profile_id, "[[COURSE_TASK_ID]]")
+    state = app.runtime.course_attempt(profile_id, "[[SPORTS_TASK_ID]]")
     assert state.status == expected_status
     assert state.attempt_count == 1
     assert "HTTP 200" in state.message
     assert response_text in state.message
+    assert requested_task_ids == ["[[SPORTS_TASK_ID]]"]
+    assert requested_payloads == [
+        {
+            "p_xktjz": "rwtjzyx",
+            "p_xn": "2026-2027",
+            "p_xq": "1",
+            "p_xkfsdm": "bx-b-b-ty3",
+            "p_kclb": "19",
+            "p_id": "[[SPORTS_TASK_ID]]",
+        }
+    ]
 
 
 @pytest.mark.parametrize(
     ("response_text", "expected_status"),
     [
+        (
+            '{"gjhczztm":"OPERATE.RESULT_SUCCESS",'
+            '"message":"操作成功","jg":"1"}',
+            "选课成功",
+        ),
+        ('{"jg":"1","message":"[[SUCCESS_MESSAGE]]"}', "选课成功"),
+        ('{"jg":"0","message":"操作成功"}', "选课成功"),
+        (
+            '{"gjhczztm":"XKGL.OPERATE.RESULT_YCGDWRL",'
+            '"message":"操作成功","jg":"1"}',
+            "课程容量已满",
+        ),
+        ("该课程/项目已选，不可重复选课", "选课成功"),
         ("不在设定的选课时间范围内", "不在设定的选课时间范围内"),
+        (
+            '{"gjhczztm":"XKGL.OPERATE.RESULT_BZXKSJN",'
+            '"message":"不在设置的时间范围内,课程：体育III","jg":"-1"}',
+            "不在设定的选课时间范围内",
+        ),
         ("选课成功", "选课成功"),
         ("课程容量已满", "课程容量已满"),
         ("不符合选课要求", "不符合选课要求"),
