@@ -8,6 +8,15 @@ from dataclasses import dataclass
 from bs4 import BeautifulSoup
 
 
+COURSE_TYPE_DEFINITIONS: tuple[tuple[str, str], ...] = (
+    ("素质扩展课", "sztzk-b-b"),
+    ("专业扩展课", "zytzk-b-b"),
+    ("MOOC", "mooc-b-b"),
+    ("必修课", "bx-b-b"),
+    ("体育III", "bx-b-b-ty3"),
+)
+
+
 DISPLAY_COLUMNS: tuple[tuple[str, str], ...] = (
     ("display_name", "展示名称"),
     ("course_code", "课程代码"),

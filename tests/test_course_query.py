@@ -1,6 +1,7 @@
 """课程联合查询与响应字段映射的单元测试。"""
 
 from course_query import (
+    COURSE_TYPE_DEFINITIONS,
     CourseSearchCriteria,
     build_course_query_payload,
     extract_course_search_results,
@@ -122,4 +123,97 @@ def test_extract_course_search_results_maps_requested_columns() -> None:
     assert result.schedule == "1-16周,星期三第11-12节 逸夫楼202"
     assert result.capacity_selected == "70/108"
     assert result.offering_college == "人文素质教育中心"
+    assert result.campus == "校本部"
+
+
+def test_sports_iii_course_type_definition_and_query_payload() -> None:
+    """
+    验证体育III课程类型代码及其查询学期字段。
+
+    Args:
+        None.
+
+    Returns:
+        None: 断言共享课程类型配置和查询负载值。
+    """
+    course_type_codes = dict(COURSE_TYPE_DEFINITIONS)
+
+    assert course_type_codes["体育III"] == "bx-b-b-ty3"
+
+    payload = build_course_query_payload(
+        semester="2026-2027-1",
+        course_type_code=course_type_codes["体育III"],
+        criteria=CourseSearchCriteria(course_code="11101013", course_name="体育III"),
+    )
+
+    assert {
+        key: payload[key]
+        for key in (
+            "p_xn",
+            "p_xq",
+            "p_xnxq",
+            "p_dqxn",
+            "p_dqxq",
+            "p_dqxnxq",
+            "p_xkfsdm",
+        )
+    } == {
+        "p_xn": "2026-2027",
+        "p_xq": "1",
+        "p_xnxq": "2026-20271",
+        "p_dqxn": "2026-2027",
+        "p_dqxq": "1",
+        "p_dqxnxq": "2026-20271",
+        "p_xkfsdm": "bx-b-b-ty3",
+    }
+
+
+def test_extract_course_search_results_maps_sports_iii_response() -> None:
+    """
+    验证脱敏后的体育III教学班响应能够映射到查询结果。
+
+    Args:
+        None.
+
+    Returns:
+        None: 断言体育III关键字段及 kclb=19 的映射结果。
+    """
+    response_payload = {
+        "kxrwList": {
+            "list": [
+                {
+                    "id": "[[SPORTS_TASK_ID]]",
+                    "rwmc": "体育III(乒乓球)",
+                    "kcdm": "11101013",
+                    "kcmc": "体育III",
+                    "kclb": "19",
+                    "kclbmc": "通识课程",
+                    "dgjsmc": "[[SPORTS_TEACHER]]",
+                    "zrl": "34",
+                    "yxzrs": "0",
+                    "kkyxmc": "体育部",
+                    "kcxx": (
+                        "<div class='ivu-tag-cyan'><span class='ivu-tag-text'>"
+                        "1-16周,星期三第3-4节 体育馆"
+                        "</span></div>"
+                    ),
+                    "xiaoqumc": "校本部",
+                }
+            ]
+        }
+    }
+
+    results = extract_course_search_results(response_payload)
+
+    assert len(results) == 1
+    result = results[0]
+    assert result.task_id == "[[SPORTS_TASK_ID]]"
+    assert result.display_name == "体育III(乒乓球)"
+    assert result.course_code == "11101013"
+    assert result.course_name == "体育III"
+    assert result.category_code == "19"
+    assert result.course_category == "通识课程"
+    assert result.teacher == "[[SPORTS_TEACHER]]"
+    assert result.capacity_selected == "34/0"
+    assert result.schedule == "1-16周,星期三第3-4节 体育馆"
     assert result.campus == "校本部"
