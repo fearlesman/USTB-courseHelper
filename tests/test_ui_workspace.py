@@ -9,8 +9,29 @@ from typing import Any
 
 import pytest
 
+import app_legacy
+
 from multi_user_runtime import MultiUserRuntime
 from user_profiles import UserProfileStore
+
+
+def _create_test_root(app_module: ModuleType) -> Any:
+    """创建真实 Tk 根窗口并容忍环境性 Tcl 初始化抖动。
+
+    真实 Tk 测试在部分 Windows/杀软环境下偶发 "Can't find a usable
+    tk.tcl"（ttk 库文件瞬时读取失败）的 TclError；此处对创建动作做
+    一次性重试，避免环境噪声影响既有断言，不改变测试语义。
+
+    Args:
+        app_module: 已加载的课程助手入口模块。
+
+    Returns:
+        成功创建的 Tk 根窗口实例。
+    """
+    try:
+        return app_module.tk.Tk()
+    except app_module.tk.TclError:
+        return app_module.tk.Tk()
 
 
 class FakeNotebook:
@@ -285,11 +306,11 @@ def test_add_selected_courses_requires_current_student(
         "showerror",
         lambda title, message: messages.append((title, message)),
     )
-    monkeypatch.setattr(app_module, "course_data_list", [])
+    monkeypatch.setattr(app_legacy, "course_data_list", [])
 
     app.add_selected_courses()
 
-    assert app_module.course_data_list == []
+    assert app_legacy.course_data_list == []
     assert app.tab_control.selected is app.rush_tab
     assert messages == [("错误", "请先在抢课任务页设置抢课人员")]
 
@@ -381,9 +402,9 @@ def test_start_auto_selection_opens_rush_page_without_numeric_index(
     app._set_rush_controls_enabled = control_states.append
     monkeypatch.setattr(app_module.messagebox, "askyesno", lambda *args: True)
     monkeypatch.setattr(app_module.threading, "Thread", FakeThread)
-    monkeypatch.setattr(app_module, "final_cookies_dict", {"SESSION": "[[TOKEN]]"})
+    monkeypatch.setattr(app_legacy, "final_cookies_dict", {"SESSION": "[[TOKEN]]"})
     monkeypatch.setattr(
-        app_module,
+        app_legacy,
         "course_data_list",
         [
             {
@@ -393,8 +414,8 @@ def test_start_auto_selection_opens_rush_page_without_numeric_index(
             }
         ],
     )
-    monkeypatch.setattr(app_module, "selection_running", False)
-    monkeypatch.setattr(app_module, "stop_selection", False)
+    monkeypatch.setattr(app_legacy, "selection_running", False)
+    monkeypatch.setattr(app_legacy, "stop_selection", False)
 
     app.start_auto_selection()
 
@@ -419,13 +440,12 @@ def test_tk_workspace_builds_progressive_account_controls_and_two_pages(
         None: 测试仅通过断言验证 Tkinter 控件结构。
     """
     monkeypatch.setattr(app_module.threading, "Thread", FakeThread)
-    root = app_module.tk.Tk()
+    root = _create_test_root(app_module)
     root.withdraw()
     try:
-        app = app_module.CourseSelectionApp(root)
+        app = app_module.CourseSelectionApp(root, data_directory=str(tmp_path))
         root.update_idletasks()
 
-        assert app.browser_driver_warmup_thread.started is True
         tab_names = [
             app.tab_control.tab(index, "text")
             for index in range(app.tab_control.index("end"))
@@ -438,14 +458,14 @@ def test_tk_workspace_builds_progressive_account_controls_and_two_pages(
         assert not hasattr(app, "manage_users_btn")
         assert not hasattr(app, "login_workspace")
         assert app.quick_login_btn.cget("text") == "重新生成二维码"
-        assert str(app.quick_login_btn.cget("state")) == "disabled"
+        assert str(app.quick_login_btn.cget("state")) == "normal"
         assert app.quick_login_btn.winfo_manager() == ""
-        assert str(app.global_login_btn.cget("state")) == "disabled"
-        assert app.status_var.get() == "浏览器驱动准备中..."
+        assert str(app.global_login_btn.cget("state")) == "normal"
+        assert app.status_var.get() == "正在准备登录..."
         app.open_user_manager()
         root.update_idletasks()
-        assert str(app.add_user_btn.cget("state")) == "disabled"
-        assert str(app.manager_login_btn.cget("state")) == "disabled"
+        assert str(app.add_user_btn.cget("state")) == "normal"
+        assert str(app.manager_login_btn.cget("state")) == "normal"
         app.close_user_manager()
         assert app.quick_login_frame.winfo_exists()
         assert app.quick_qr_frame.winfo_manager() == "grid"
@@ -453,7 +473,7 @@ def test_tk_workspace_builds_progressive_account_controls_and_two_pages(
         assert app.quick_qr_frame.winfo_reqwidth() >= 400
         assert app.quick_qr_frame.winfo_reqheight() >= 430
         assert set(app.quick_qr_label.grid_info()["sticky"]) == set("nsew")
-        assert app.quick_qr_label.cget("text") == "浏览器驱动准备中..."
+        assert app.quick_qr_label.cget("text") == "正在准备登录..."
         assert not hasattr(app, "quick_login_copy")
         assert app.course_result_tree.winfo_manager() == "grid"
         assert app.course_tree.winfo_manager() == "grid"
@@ -482,49 +502,12 @@ def test_tk_workspace_builds_progressive_account_controls_and_two_pages(
         )
         assert not hasattr(app, "clear_log_btn")
 
-        class CompletedWarmup:
-            """提供已完成浏览器驱动预匹配状态的测试替身。"""
-
-            def status(self) -> tuple[bool, str | None]:
-                """返回预匹配成功状态。
-
-                Args:
-                    self: 当前预热替身实例。
-
-                Returns:
-                    已完成且无错误的状态元组。
-                """
-                return True, None
-
-        app.browser_driver_warmup = CompletedWarmup()
-        app.refresh_browser_driver_status()
-        assert app.status_var.get() == "正在生成登录二维码..."
-        assert app.quick_qr_label.cget("text") == "正在生成登录二维码..."
+        # 纯 HTTP 登录不再等待浏览器驱动：登录页即进入自动扫码准备状态，
+        # 自动登录已在界面构建时安排且不会重复排队。
         assert app._automatic_login_scheduled is True
-        assert app.quick_login_btn.winfo_manager() == ""
-        assert str(app.global_login_btn.cget("state")) == "normal"
-
-        class FailedWarmup:
-            """提供浏览器驱动预匹配失败状态的测试替身。"""
-
-            def status(self) -> tuple[bool, str | None]:
-                """返回带原始原因的预匹配失败状态。
-
-                Args:
-                    self: 当前预热替身实例。
-
-                Returns:
-                    已完成且包含失败原因的状态元组。
-                """
-                return True, "[[DRIVER_MATCH_ERROR]]"
-
-        app.browser_driver_warmup = FailedWarmup()
-        app._automatic_login_scheduled = False
-        app.refresh_browser_driver_status()
-        assert app.status_var.get() == "浏览器驱动准备失败，请重试"
-        assert str(app.quick_login_btn.cget("state")) == "normal"
-        assert app.quick_login_btn.winfo_manager() == "grid"
-        assert str(app.global_login_btn.cget("state")) == "normal"
+        app.schedule_automatic_login()
+        app.schedule_automatic_login()
+        assert app._automatic_login_scheduled is True
 
         store = UserProfileStore(tmp_path)
         first = store.create("默认用户")
@@ -579,6 +562,161 @@ def test_tk_workspace_builds_progressive_account_controls_and_two_pages(
         assert app.rush_time_frame.winfo_manager() == ""
     finally:
         root.destroy()
+
+
+def test_login_loading_progress_bar_built_on_login_page(
+    app_module: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """验证登录页进度条随阶段同步并可在完成后隐藏。
+
+    Args:
+        app_module: 已加载的课程助手入口模块。
+        monkeypatch: pytest 提供的运行时替换工具。
+        tmp_path: pytest 临时目录。
+
+    Returns:
+        None: 通过断言验证进度条初始可见、阶段文本可更新且可隐藏。
+    """
+    monkeypatch.setattr(app_module.threading, "Thread", FakeThread)
+    root = _create_test_root(app_module)
+    root.withdraw()
+    try:
+        app = app_module.CourseSelectionApp(root, data_directory=str(tmp_path))
+        root.update_idletasks()
+        assert app.login_progress_frame.winfo_manager() == "grid"
+        assert app.login_progress_label.cget("text") == "正在连接统一认证..."
+        app.update_login_loading_stage("正在打开登录页面...")
+        assert app.login_progress_label.cget("text") == "正在打开登录页面..."
+        app.stop_login_loading()
+        assert app.login_progress_frame.winfo_manager() == ""
+        app.start_login_loading("正在生成登录二维码...")
+        assert app.login_progress_frame.winfo_manager() == "grid"
+        assert app.login_progress_label.cget("text") == "正在生成登录二维码..."
+    finally:
+        root.destroy()
+
+
+def test_login_loading_progress_bar_control_logic(
+    app_module: ModuleType,
+) -> None:
+    """验证登录进度条启动、阶段更新与停止的幂等状态机。
+
+    Args:
+        app_module: 已加载的课程助手入口模块。
+
+    Returns:
+        None: 通过断言验证重复启动与停止不会重复触发动画。
+    """
+    class FakeBar:
+        """记录进度条动画启动与停止次数。"""
+
+        def __init__(self) -> None:
+            """初始化空计数。
+
+            Args:
+                None.
+
+            Returns:
+                None: 计数从零开始。
+            """
+            self.started = 0
+            self.stopped = 0
+
+        def start(self, interval: int) -> None:
+            """记录一次启动。
+
+            Args:
+                interval: 被忽略的动画间隔。
+
+            Returns:
+                None: 启动计数加一。
+            """
+            self.started += 1
+
+        def stop(self) -> None:
+            """记录一次停止。
+
+            Args:
+                None.
+
+            Returns:
+                None: 停止计数加一。
+            """
+            self.stopped += 1
+
+    class FakeWidget:
+        """记录文本与网格可见状态的最简替身。"""
+
+        def __init__(self) -> None:
+            """初始化可见状态与空文本。
+
+            Args:
+                None.
+
+            Returns:
+                None: 初始可见且文本为空。
+            """
+            self.text = ""
+            self.manager = "grid"
+
+        def config(self, **options: object) -> None:
+            """记录配置参数。
+
+            Args:
+                **options: 需要写入的配置项。
+
+            Returns:
+                None: 配置项写入实例属性。
+            """
+            for key, value in options.items():
+                setattr(self, key, value)
+
+        def grid(self, **options: object) -> None:
+            """记录网格显示状态。
+
+            Args:
+                **options: 被忽略的布局参数。
+
+            Returns:
+                None: 控件标记为可见。
+            """
+            self.manager = "grid"
+
+        def grid_remove(self) -> None:
+            """记录网格隐藏状态。
+
+            Args:
+                None.
+
+            Returns:
+                None: 控件标记为隐藏。
+            """
+            self.manager = ""
+
+    app = app_module.CourseSelectionApp.__new__(app_module.CourseSelectionApp)
+    bar = FakeBar()
+    label = FakeWidget()
+    frame = FakeWidget()
+    app.login_progress_bar = bar
+    app.login_progress_label = label
+    app.login_progress_frame = frame
+
+    app.start_login_loading("第一阶段")
+    assert label.text == "第一阶段"
+    assert bar.started == 1
+    assert frame.manager == "grid"
+    app.start_login_loading("第二阶段")
+    assert bar.started == 1
+    assert label.text == "第二阶段"
+    app.update_login_loading_stage("第三阶段")
+    assert label.text == "第三阶段"
+    app.stop_login_loading()
+    assert bar.stopped == 1
+    assert frame.manager == ""
+    app.stop_login_loading()
+    assert bar.stopped == 1
 
 
 def test_existing_account_startup_stays_on_login_view(
@@ -692,7 +830,7 @@ def test_student_switch_resets_named_list_state(
     app.load_saved_course_list = lambda student_name=None: None
     reset_calls: list[bool] = []
     app.reset_current_saved_list_state = lambda: reset_calls.append(True)
-    monkeypatch.setattr(app_module, "selection_running", False)
+    monkeypatch.setattr(app_legacy, "selection_running", False)
 
     app.process_student_switch()
 
@@ -714,7 +852,7 @@ def test_loading_saved_list_cancel_keeps_current_courses(
     """
     app = app_module.CourseSelectionApp.__new__(app_module.CourseSelectionApp)
     original = [{"id": 1, "name": "[[CURRENT_COURSE]]"}]
-    monkeypatch.setattr(app_module, "course_data_list", original)
+    monkeypatch.setattr(app_legacy, "course_data_list", original)
     monkeypatch.setattr(app_module.messagebox, "askyesno", lambda *args: False)
     saved = type(
         "SavedList",
@@ -724,7 +862,7 @@ def test_loading_saved_list_cancel_keeps_current_courses(
 
     app.load_named_rush_list(saved)
 
-    assert app_module.course_data_list is original
+    assert app_legacy.course_data_list is original
 
 
 def test_empty_course_list_cannot_open_save_dialog(
@@ -742,8 +880,8 @@ def test_empty_course_list_cannot_open_save_dialog(
     app = app_module.CourseSelectionApp.__new__(app_module.CourseSelectionApp)
     app.current_student_name = "[[STUDENT_NAME]]"
     messages: list[tuple[str, str]] = []
-    monkeypatch.setattr(app_module, "course_data_list", [])
-    monkeypatch.setattr(app_module, "selection_running", False)
+    monkeypatch.setattr(app_legacy, "course_data_list", [])
+    monkeypatch.setattr(app_legacy, "selection_running", False)
     monkeypatch.setattr(
         app_module.messagebox,
         "showerror",
@@ -793,17 +931,17 @@ def test_loading_saved_list_replaces_draft_and_marks_clean(
         lambda item, dirty=False: current_calls.append((item, dirty))
     )
     app.status_var = FakeVariable()
-    monkeypatch.setattr(app_module, "selection_running", False)
+    monkeypatch.setattr(app_legacy, "selection_running", False)
     monkeypatch.setattr(app_module.messagebox, "askyesno", lambda *args: True)
     monkeypatch.setattr(
-        app_module, "course_data_list", [{"id": 1, "name": "[[CURRENT_COURSE]]"}]
+        app_legacy, "course_data_list", [{"id": 1, "name": "[[CURRENT_COURSE]]"}]
     )
-    monkeypatch.setattr(app_module, "course_id_count", 1)
+    monkeypatch.setattr(app_legacy, "course_id_count", 1)
 
     result = app.load_named_rush_list(saved)
 
     assert result is True
-    assert app_module.course_data_list is replacement
+    assert app_legacy.course_data_list is replacement
     assert save_calls == [True]
     assert update_calls == [True]
     assert current_calls == [(saved, False)]
@@ -875,13 +1013,13 @@ def test_deleting_current_named_list_keeps_courses_and_resets_state(
     )()
     app.refresh_rush_list_manager = lambda tree: None
     courses = [{"id": 1, "name": "[[CURRENT_COURSE]]"}]
-    monkeypatch.setattr(app_module, "course_data_list", courses)
-    monkeypatch.setattr(app_module, "selection_running", False)
+    monkeypatch.setattr(app_legacy, "course_data_list", courses)
+    monkeypatch.setattr(app_legacy, "selection_running", False)
     monkeypatch.setattr(app_module.messagebox, "askyesno", lambda *args: True)
 
     app.delete_selected_named_rush_list(FakeTree())
 
-    assert app_module.course_data_list is courses
+    assert app_legacy.course_data_list is courses
     assert deleted == [saved.id]
     assert app.current_saved_list_id is None
     assert app.current_saved_list_dirty is True

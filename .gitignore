@@ -1,2 +1,8 @@
 *.json
 logs/
+
+# pytest 临时目录与受限沙箱遗留的测试残留
+.p*/
+
+probe*/
+tmpduup*/

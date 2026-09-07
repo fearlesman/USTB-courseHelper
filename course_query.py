@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -74,9 +75,15 @@ class CourseSearchResult:
             None.
 
         Returns:
-            与 DISPLAY_COLUMNS 顺序一致的字符串元组。
+            与 DISPLAY_COLUMNS 顺序一致的字符串元组；上课信息按时间段分号分隔。
         """
-        return tuple(getattr(self, field_name) for field_name, _ in DISPLAY_COLUMNS)
+        values = []
+        for field_name, _ in DISPLAY_COLUMNS:
+            value = getattr(self, field_name)
+            if field_name == "schedule":
+                value = format_schedule_text(value)
+            values.append(value)
+        return tuple(values)
 
 
 def remove_empty_values(value: object) -> object:
@@ -292,3 +299,26 @@ def _extract_schedule(course_html: str) -> str:
     schedule_tags = document.select(".ivu-tag-cyan .ivu-tag-text")
     schedules = [tag.get_text(" ", strip=True) for tag in schedule_tags]
     return "\n".join(schedule for schedule in schedules if schedule) or "—"
+
+
+_SCHEDULE_SEGMENT_RE = re.compile(r"节(?=\s*[0-9０-９周星])")
+
+
+def format_schedule_text(text: str) -> str:
+    """
+    规整上课安排文本，使每个上课时间段之间以中文分号分隔。
+
+    Args:
+        text: 原始上课安排，可能是多段粘连或以空白分隔的字符串。
+
+    Returns:
+        时间段之间以「；」分隔的单行文本，适合表格单元格展示；
+        空值、占位符或无效输入保持原样返回。
+    """
+    if not text or text in {"—", "-"}:
+        return text
+    normalized = re.sub(r"\s*\n\s*", "；", text.strip())
+    normalized = _SCHEDULE_SEGMENT_RE.sub("节；", normalized)
+    normalized = re.sub(r"\s*；\s*", "；", normalized)
+    normalized = re.sub(r"；+", "；", normalized)
+    return normalized.strip("；")

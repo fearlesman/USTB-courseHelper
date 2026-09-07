@@ -640,6 +640,292 @@ def test_selection_worker_records_course_response_in_runtime(
     assert response_text in state.message
 
 
+def test_environment_error_stops_selection_without_expiring_session(
+    app_module: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """验证 TLS/代理类异常使抢课任务停止并提示重登，而不清除会话。
+
+    Args:
+        app_module: 已加载的课程助手入口模块。
+        tmp_path: pytest 临时目录。
+        monkeypatch: pytest 提供的运行时替换工具。
+
+    Returns:
+        None: 通过断言验证任务停止、Cookie 保留与可选的重新登录入口。
+    """
+    class FakeStopEvent:
+        """提供不等待的停止事件替身。"""
+
+        def __init__(self) -> None:
+            """初始化未停止状态。
+
+            Args:
+                None.
+
+            Returns:
+                None: 初始状态保存在实例属性中。
+            """
+            self.stopped = False
+
+        def wait(self, timeout: float | None = None) -> bool:
+            """跳过真实等待并返回停止状态。
+
+            Args:
+                timeout: 被忽略的等待秒数。
+
+            Returns:
+                当前是否已停止。
+            """
+            return self.stopped
+
+        def is_set(self) -> bool:
+            """返回当前停止状态。
+
+            Args:
+                None.
+
+            Returns:
+                当前是否已停止。
+            """
+            return self.stopped
+
+        def set(self) -> None:
+            """设置停止状态。
+
+            Args:
+                None.
+
+            Returns:
+                None: 后续状态检查返回 True。
+            """
+            self.stopped = True
+
+    class FakeSession:
+        """每次抢课请求都抛出 TLS 异常。"""
+
+        def __init__(self) -> None:
+            """初始化 Cookie 和请求头容器。
+
+            Args:
+                None.
+
+            Returns:
+                None: 空容器保存在实例属性中。
+            """
+            self.cookies: dict[str, str] = {}
+            self.headers: dict[str, str] = {}
+
+        def post(
+            self,
+            url: str,
+            data: dict[str, object],
+            timeout: int,
+        ) -> None:
+            """抛出模拟的证书校验异常。
+
+            Args:
+                url: 被忽略的抢课地址。
+                data: 被忽略的课程请求参数。
+                timeout: 被忽略的超时秒数。
+
+            Raises:
+                requests.exceptions.SSLError: 模拟证书校验失败。
+            """
+            raise app_module.requests.exceptions.SSLError(
+                "certificate verify failed"
+            )
+
+    app, profile_id, _ = _make_app(app_module, tmp_path)
+    app.finish_user_task_ui = lambda target_id: None
+    app.apply_active_user_control_state = lambda: None
+    app.refresh_user_views = lambda: None
+    relogin_calls: list[bool] = []
+    app.start_login = lambda: relogin_calls.append(True)
+    monkeypatch.setattr(app_module.requests, "Session", FakeSession)
+    monkeypatch.setattr(app_module.messagebox, "askyesno", lambda *args: True)
+    app.runtime.mark_task_started(profile_id, waiting=False)
+    course = {
+        "id": 1,
+        "priority": 1,
+        "name": "[[COURSE_NAME]]",
+        "teacher": "[[TEACHER_NAME]]",
+        "data": {"p_id": "[[COURSE_TASK_ID]]"},
+    }
+
+    app._run_user_selection(
+        profile_id,
+        {"SESSION": "[[COOKIE_A]]"},
+        [course],
+        FakeStopEvent(),
+        True,
+        True,
+    )
+
+    context = app.runtime.require_context(profile_id)
+    assert context.login_state is app_module.UserLoginState.LOGGED_IN
+    assert context.cookies == {"SESSION": "[[COOKIE_A]]"}
+    assert context.last_result == "网络环境异常，任务已停止"
+    assert context.task_state is app_module.UserTaskState.FAILED
+    assert relogin_calls == [True]
+    state = app.runtime.course_attempt(profile_id, "[[COURSE_TASK_ID]]")
+    assert state.status == "请求失败"
+    assert state.attempt_count == 1
+
+
+def test_environment_error_without_relogin_keeps_session(
+    app_module: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """验证用户拒绝重登时任务停止但不触发重新扫码。
+
+    Args:
+        app_module: 已加载的课程助手入口模块。
+        tmp_path: pytest 临时目录。
+        monkeypatch: pytest 提供的运行时替换工具。
+
+    Returns:
+        None: 通过断言验证拒绝重登后会话与 Cookie 保持不变。
+    """
+    class FakeStopEvent:
+        """提供不等待的停止事件替身。"""
+
+        def __init__(self) -> None:
+            """初始化未停止状态。
+
+            Args:
+                None.
+
+            Returns:
+                None: 初始状态保存在实例属性中。
+            """
+            self.stopped = False
+
+        def wait(self, timeout: float | None = None) -> bool:
+            """跳过真实等待并返回停止状态。
+
+            Args:
+                timeout: 被忽略的等待秒数。
+
+            Returns:
+                当前是否已停止。
+            """
+            return self.stopped
+
+        def is_set(self) -> bool:
+            """返回当前停止状态。
+
+            Args:
+                None.
+
+            Returns:
+                当前是否已停止。
+            """
+            return self.stopped
+
+        def set(self) -> None:
+            """设置停止状态。
+
+            Args:
+                None.
+
+            Returns:
+                None: 后续状态检查返回 True。
+            """
+            self.stopped = True
+
+    class FakeSession:
+        """每次抢课请求都抛出代理异常。"""
+
+        def __init__(self) -> None:
+            """初始化 Cookie 和请求头容器。
+
+            Args:
+                None.
+
+            Returns:
+                None: 空容器保存在实例属性中。
+            """
+            self.cookies: dict[str, str] = {}
+            self.headers: dict[str, str] = {}
+
+        def post(
+            self,
+            url: str,
+            data: dict[str, object],
+            timeout: int,
+        ) -> None:
+            """抛出模拟的代理连接异常。
+
+            Args:
+                url: 被忽略的抢课地址。
+                data: 被忽略的课程请求参数。
+                timeout: 被忽略的超时秒数。
+
+            Raises:
+                requests.exceptions.ProxyError: 模拟代理连接失败。
+            """
+            raise app_module.requests.exceptions.ProxyError("proxy unavailable")
+
+    app, profile_id, _ = _make_app(app_module, tmp_path)
+    app.finish_user_task_ui = lambda target_id: None
+    app.apply_active_user_control_state = lambda: None
+    app.refresh_user_views = lambda: None
+    relogin_calls: list[bool] = []
+    app.start_login = lambda: relogin_calls.append(True)
+    monkeypatch.setattr(app_module.requests, "Session", FakeSession)
+    monkeypatch.setattr(app_module.messagebox, "askyesno", lambda *args: False)
+    app.runtime.mark_task_started(profile_id, waiting=False)
+    course = {
+        "id": 1,
+        "priority": 1,
+        "name": "[[COURSE_NAME]]",
+        "teacher": "[[TEACHER_NAME]]",
+        "data": {"p_id": "[[COURSE_TASK_ID]]"},
+    }
+
+    app._run_user_selection(
+        profile_id,
+        {"SESSION": "[[COOKIE_A]]"},
+        [course],
+        FakeStopEvent(),
+        True,
+        True,
+    )
+
+    context = app.runtime.require_context(profile_id)
+    assert context.login_state is app_module.UserLoginState.LOGGED_IN
+    assert context.cookies == {"SESSION": "[[COOKIE_A]]"}
+    assert context.last_result == "网络环境异常，任务已停止"
+    assert relogin_calls == []
+    state = app.runtime.course_attempt(profile_id, "[[COURSE_TASK_ID]]")
+    assert state.status == "请求失败"
+    assert state.attempt_count == 1
+
+
+def test_environment_error_detection_only_covers_connection_layer(
+    app_module: ModuleType,
+) -> None:
+    """验证环境异常判定只覆盖连接、TLS 与代理层错误。
+
+    Args:
+        app_module: 已加载的课程助手入口模块。
+
+    Returns:
+        None: 通过断言验证分类边界符合预期。
+    """
+    ssl_error = app_module.requests.exceptions.SSLError("[[SSL]]")
+    proxy_error = app_module.requests.exceptions.ProxyError("[[PROXY]]")
+    timeout_error = app_module.requests.exceptions.ConnectionError("[[TIMEOUT]]")
+    other_error = app_module.requests.exceptions.HTTPError("[[HTTP]]")
+    assert app_module.is_environment_request_error(ssl_error) is True
+    assert app_module.is_environment_request_error(proxy_error) is True
+    assert app_module.is_environment_request_error(timeout_error) is True
+    assert app_module.is_environment_request_error(other_error) is False
+
+
 @pytest.mark.parametrize(
     ("response_text", "expected_status"),
     [
@@ -1048,10 +1334,10 @@ def test_successful_login_enters_workspace_without_info_dialog(
     assert app._first_launch is False
 
 
-def test_automatic_login_starts_only_once_after_driver_ready(
+def test_automatic_login_starts_only_once_without_confirmation(
     app_module: ModuleType,
 ) -> None:
-    """验证驱动就绪后的自动登录只启动一次且不需要确认按钮。
+    """验证自动扫码登录只启动一次且不需要确认按钮。
 
     Args:
         app_module: 已加载的课程助手入口模块。
@@ -1181,3 +1467,155 @@ def test_failed_login_restores_retry_action(
     assert app._automatic_login_started is False
     assert app.quick_login_btn.shown is True
     assert app.status_var.get() == "二维码已过期"
+
+
+def _make_manual_dialog(
+    app_module: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> tuple[dict[str, Any], Any, dict[str, list[Any]]]:
+    """创建高级添加对话框替身并记录消息弹窗。
+
+    Args:
+        app_module: 已加载的应用入口模块。
+        monkeypatch: pytest 提供的运行时替换工具。
+
+    Returns:
+        对话框字段变量字典和记录调用的弹窗替身。
+    """
+
+    class FakeDialog:
+        """记录销毁调用并提供字段变量。"""
+
+        def __init__(self) -> None:
+            """初始化对话框替身。
+
+            Args:
+                None.
+
+            Returns:
+                None: 销毁记录初始化在实例属性中。
+            """
+            self.destroyed = False
+
+        def destroy(self) -> None:
+            """记录对话框关闭调用。
+
+            Args:
+                None.
+
+            Returns:
+                None: 销毁状态写入实例属性。
+            """
+            self.destroyed = True
+
+    dialog = FakeDialog()
+    fields = {
+        "name": FakeVariable("高级课程"),
+        "teacher": FakeVariable("[[TEACHER]]"),
+        "code": FakeVariable("[[CODE]]"),
+        "schedule": FakeVariable("[[SCHEDULE]]"),
+        "priority": FakeVariable("3"),
+        "type": FakeVariable("必修课"),
+        "category": FakeVariable("2301"),
+        "task_id": FakeVariable("[[TASK_ID]]"),
+    }
+    shown: dict[str, list[Any]] = {"info": [], "error": []}
+    monkeypatch.setattr(
+        app_module.messagebox, "showinfo", lambda *args: shown["info"].append(args)
+    )
+    monkeypatch.setattr(
+        app_module.messagebox, "showerror", lambda *args: shown["error"].append(args)
+    )
+    return fields, dialog, shown
+
+
+def test_submit_manual_course_appends_to_active_user_and_saves(
+    app_module: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """验证高级添加成功后课程写入当前用户并触发保存。
+
+    Args:
+        app_module: 已加载的课程助手入口模块。
+        tmp_path: pytest 临时目录。
+        monkeypatch: pytest 提供的运行时替换工具。
+
+    Returns:
+        None: 通过断言验证列表、保存与提示行为。
+    """
+    app, first_id, _ = _make_app(app_module, tmp_path)
+    app.semester_var = FakeVariable("2026-2027-1")
+    calls: list[str] = []
+    app.mark_current_list_dirty = lambda: calls.append("dirty")
+    app.save_course_list = lambda: calls.append("save")
+    app.update_course_list = lambda: calls.append("update")
+    fields, dialog, shown = _make_manual_dialog(app_module, monkeypatch)
+
+    app.submit_manual_course(
+        dialog,
+        fields["name"],
+        fields["teacher"],
+        fields["code"],
+        fields["schedule"],
+        fields["priority"],
+        fields["type"],
+        fields["category"],
+        fields["task_id"],
+    )
+
+    first = app.runtime.require_context(first_id)
+    assert len(first.courses) == 1
+    course = first.courses[0]
+    assert course["name"] == "高级课程"
+    assert course["source"] == "manual"
+    assert course["priority"] == 3
+    assert course["data"]["p_id"] == "[[TASK_ID]]"
+    assert course["data"]["p_xkfsdm"] == "bx-b-b"
+    assert course["data"]["p_xn"] == "2026-2027"
+    assert course["id"] == 1
+    assert calls == ["dirty", "save", "update"]
+    assert dialog.destroyed is True
+    assert shown["info"] and shown["error"] == [] and len(shown["info"]) == 1
+
+
+def test_submit_manual_course_validation_failure_keeps_list_unchanged(
+    app_module: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """验证校验失败时课程列表保持不变且对话框不关闭。
+
+    Args:
+        app_module: 已加载的课程助手入口模块。
+        tmp_path: pytest 临时目录。
+        monkeypatch: pytest 提供的运行时替换工具。
+
+    Returns:
+        None: 通过断言验证回滚与错误提示行为。
+    """
+    app, first_id, _ = _make_app(app_module, tmp_path)
+    app.semester_var = FakeVariable("2026-2027-1")
+    calls: list[str] = []
+    app.mark_current_list_dirty = lambda: calls.append("dirty")
+    app.save_course_list = lambda: calls.append("save")
+    app.update_course_list = lambda: calls.append("update")
+    fields, dialog, shown = _make_manual_dialog(app_module, monkeypatch)
+    fields["name"].set("   ")
+    fields["priority"].set("0")
+
+    app.submit_manual_course(
+        dialog,
+        fields["name"],
+        fields["teacher"],
+        fields["code"],
+        fields["schedule"],
+        fields["priority"],
+        fields["type"],
+        fields["category"],
+        fields["task_id"],
+    )
+
+    assert app.runtime.require_context(first_id).courses == []
+    assert calls == []
+    assert dialog.destroyed is False
+    assert shown["error"] and shown["info"] == []

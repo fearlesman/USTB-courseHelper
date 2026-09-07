@@ -4,6 +4,7 @@ from course_query import (
     CourseSearchCriteria,
     build_course_query_payload,
     extract_course_search_results,
+    format_schedule_text,
     remove_empty_values,
 )
 
@@ -123,3 +124,25 @@ def test_extract_course_search_results_maps_requested_columns() -> None:
     assert result.capacity_selected == "70/108"
     assert result.offering_college == "人文素质教育中心"
     assert result.campus == "校本部"
+
+
+def test_format_schedule_text_splits_time_segments() -> None:
+    """多段时间段之间以中文分号分隔，教室与括号后缀保持同行。"""
+    assert (
+        format_schedule_text("1-16周 星期一 1-2节1-16周 星期三 3-4节")
+        == "1-16周 星期一 1-2节；1-16周 星期三 3-4节"
+    )
+    assert (
+        format_schedule_text("1-16周 星期一 1-2节 星期五 3-4节")
+        == "1-16周 星期一 1-2节；星期五 3-4节"
+    )
+    assert (
+        format_schedule_text("1-16周,星期三第11-12节 逸夫楼202")
+        == "1-16周,星期三第11-12节 逸夫楼202"
+    )
+    assert (
+        format_schedule_text("1-16周 星期一 1-2节（单周）")
+        == "1-16周 星期一 1-2节（单周）"
+    )
+    assert format_schedule_text("—") == "—"
+    assert format_schedule_text("") == ""
