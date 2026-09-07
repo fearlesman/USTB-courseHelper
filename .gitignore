@@ -1,8 +1,36 @@
-*.json
+# ============ Python ============
+# 字节码与解释器缓存
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 打包构建产物（PyInstaller 等）
+build/
+dist/
+*.egg-info/
+
+# ============ 本项目运行数据 ============
+# 运行日志目录，禁止提交（见 AGENTS.md 文件日志规则）
 logs/
+
+# 课程/档案 JSON 数据（course_cache.json、course_list_*.json、
+# user_profiles.json、user_data/ 下的草稿与命名列表等），不提交
+*.json
 
 # pytest 临时目录与受限沙箱遗留的测试残留
 .p*/
 
 probe*/
 tmpduup*/
+
+# ============ IDE / 系统 ============
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
